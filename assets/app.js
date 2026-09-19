@@ -28,14 +28,56 @@ function setAuthTab(m){
 $("loginTab").onclick=()=>setAuthTab("login"); $("registerTab").onclick=()=>setAuthTab("register");
 
 async function boot(){
-  if(!window.SUPABASE_URL || window.SUPABASE_URL.includes("YOUR_")){
-    $("loading").classList.add("hidden"); $("auth").classList.remove("hidden");
-    $("authMsg").textContent="Open assets/config.js and add your Supabase URL and anon key."; return;
+  const loading=$("loading");
+  const auth=$("auth");
+
+  const fail=(message)=>{
+    loading.classList.add("hidden");
+    auth.classList.remove("hidden");
+    $("authMsg").textContent=message;
+    console.error("[Banana]",message);
+  };
+
+  try{
+    if(!window.SUPABASE_URL || !window.SUPABASE_ANON_KEY ||
+       window.SUPABASE_URL.includes("YOUR_") ||
+       window.SUPABASE_ANON_KEY.includes("YOUR_")){
+      fail("Supabase is not configured. Open assets/config.js and enter your Project URL and anon/publishable key.");
+      return;
+    }
+
+    if(!window.supabase || typeof window.supabase.createClient!=="function"){
+      fail("Supabase library did not load. Check your internet connection or the Supabase CDN.");
+      return;
+    }
+
+    const sessionPromise=sb.auth.getSession();
+    const timeout=new Promise((_,reject)=>
+      setTimeout(()=>reject(new Error("Supabase connection timed out. Check your internet connection, Supabase URL, and API key.")),10000)
+    );
+    const result=await Promise.race([sessionPromise,timeout]);
+    const session=result?.data?.session;
+
+    if(session){
+      await enter(session);
+    }else{
+      loading.classList.add("hidden");
+      auth.classList.remove("hidden");
+    }
+  }catch(err){
+    fail(err?.message || "Could not connect to Supabase.");
   }
-  const {data:{session}}=await sb.auth.getSession();
-  if(session){ await enter(session); } else { $("loading").classList.add("hidden"); $("auth").classList.remove("hidden"); }
 }
-sb.auth.onAuthStateChange((_event,session)=>{ if(session && !me) enter(session); });
+
+sb.auth.onAuthStateChange((event,session)=>{
+  if(event==="SIGNED_OUT"){
+    me=null;
+    $("app").classList.add("hidden");
+    $("loading").classList.add("hidden");
+    $("auth").classList.remove("hidden");
+  }
+  // Initial session is handled by boot(). Avoid calling enter() twice.
+});
 
 async function usernameExists(username){
   const {data,error}=await sb.rpc("username_available",{p_username:username});
@@ -69,20 +111,32 @@ $("authForm").onsubmit=authSubmit;
 
 async function enter(session){
   $("loading").classList.remove("hidden"); $("auth").classList.add("hidden");
-  const {data,error}=await sb.rpc("enter_app",{p_device_id:deviceId});
-  if(error){ await sb.auth.signOut(); $("loading").classList.add("hidden"); $("auth").classList.remove("hidden"); $("authMsg").textContent=error.message; return; }
+  try{
+    const rpcPromise=sb.rpc("enter_app",{p_device_id:deviceId});
+    const timeout=new Promise((_,reject)=>
+      setTimeout(()=>reject(new Error("Supabase did not respond within 10 seconds.")),10000)
+    );
+    const {data,error}=await Promise.race([rpcPromise,timeout]);
+    if(error) throw error;
   if(!data.allowed){
     await sb.auth.signOut(); $("loading").classList.add("hidden"); $("auth").classList.remove("hidden");
     $("authMsg").textContent=data.message||"Access denied."; return;
   }
-  me=data.profile;
-  $("topUser").textContent="@"+me.username;
-  $("profileName").textContent="@"+me.username;
-  $("avatar").textContent=me.username[0].toUpperCase();
-  $("profileJoined").textContent="Joined "+new Date(me.created_at).toLocaleDateString();
-  $("adminBox").classList.toggle("hidden",!me.is_admin);
-  $("app").classList.remove("hidden"); $("loading").classList.add("hidden");
-  await refreshGame(); await refreshChallenge(); await refreshRanks(); renderProfile();
+    me=data.profile;
+    $("topUser").textContent="@"+me.username;
+    $("profileName").textContent="@"+me.username;
+    $("avatar").textContent=me.username[0].toUpperCase();
+    $("profileJoined").textContent="Joined "+new Date(me.created_at).toLocaleDateString();
+    $("adminBox").classList.toggle("hidden",!me.is_admin);
+    $("app").classList.remove("hidden"); $("loading").classList.add("hidden");
+    await refreshGame(); await refreshChallenge(); await refreshRanks(); renderProfile();
+  }catch(err){
+    console.error("[Banana enter]",err);
+    try{await sb.auth.signOut();}catch(_){}
+    $("loading").classList.add("hidden");
+    $("auth").classList.remove("hidden");
+    $("authMsg").textContent=err?.message || "Could not enter the app.";
+  }
 }
 
 async function refreshGame(){
