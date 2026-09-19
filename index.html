@@ -1,29 +1,116 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Guessino</title>
-<script>
-(function () {
-  function baseDir() {
-    var path = location.pathname || '/';
-    if (/\/index\.html$/i.test(path)) path = path.replace(/\/index\.html$/i, '/');
-    else if (!path.endsWith('/')) {
-      if (/\.[a-zA-Z0-9]+$/.test(path.split('/').pop())) path = path.replace(/\/[^/]*$/, '/');
-      else path = path + '/';
-    }
-    return path;
-  }
-  try {
-    var b = baseDir();
-    if (localStorage.getItem('gz_user_id')) location.replace(b + 'home/app/');
-    else location.replace(b + 'home/login/');
-  } catch (e) {
-    location.replace('home/login/');
-  }
-})();
-</script>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0b0b0d">
+<title>Banana Clicker</title>
+<link rel="stylesheet" href="assets/style.css">
 </head>
-<body></body>
+<body>
+<div id="toast"></div>
+<div id="loading" class="loading"><div class="spinner"></div><span>Loading...</span></div>
+
+<section id="auth" class="screen hidden">
+  <div class="auth-card">
+    <div class="brand-mark">B</div>
+    <h1>Banana</h1>
+    <p class="muted">Click. Upgrade. Climb.</p>
+    <div class="tabs">
+      <button id="loginTab" class="tab active">Login</button>
+      <button id="registerTab" class="tab">Register</button>
+    </div>
+    <form id="authForm">
+      <input id="username" autocomplete="username" minlength="3" maxlength="24" placeholder="Username" required>
+      <input id="password" type="password" autocomplete="current-password" minlength="6" placeholder="Password" required>
+      <button class="primary wide" type="submit" id="authSubmit">Login</button>
+    </form>
+    <p id="authMsg" class="msg"></p>
+  </div>
+</section>
+
+<section id="app" class="hidden">
+  <header class="topbar">
+    <div>
+      <div class="eyebrow">BANANA</div>
+      <strong id="topUser">@user</strong>
+    </div>
+    <button class="icon-btn" id="settingsBtn" aria-label="Settings">⚙</button>
+  </header>
+
+  <main>
+    <section id="gamePage" class="page">
+      <div class="stats-grid">
+        <div class="stat"><span>COINS</span><b id="coins">0</b></div>
+        <div class="stat"><span>LEVEL</span><b id="level">1</b></div>
+        <div class="stat"><span>POWER</span><b id="power">1</b></div>
+      </div>
+      <div class="xp-wrap">
+        <div class="xp-head"><span>XP</span><span id="xpText">0 / 100</span></div>
+        <div class="xp-bar"><i id="xpBar"></i></div>
+      </div>
+
+      <div class="coin-zone">
+        <div id="floaters"></div>
+        <button id="coinButton" class="coin" aria-label="Click banana">
+          <span class="coin-inner">
+            <span class="banana">🍌</span>
+            <small>CLICK</small>
+          </span>
+        </button>
+      </div>
+
+      <div class="game-actions">
+        <button id="upgradeBtn" class="action-card">
+          <span class="action-icon">↗</span>
+          <span><b>Upgrade</b><small>Power <i id="upgradeCost">25</i> coins</small></span>
+        </button>
+        <button id="challengeBtn" class="action-card">
+          <span class="action-icon">✦</span>
+          <span><b>Daily Challenge</b><small id="challengeText">Loading...</small></span>
+        </button>
+      </div>
+    </section>
+
+    <section id="ranksPage" class="page hidden">
+      <div class="page-title"><div><h2>Ranks</h2><p>Top players</p></div><span class="badge">LIVE</span></div>
+      <input id="rankSearch" class="search" placeholder="Search username...">
+      <div id="rankList" class="rank-list"></div>
+    </section>
+
+    <section id="profilePage" class="page hidden">
+      <div class="profile-head">
+        <div id="avatar" class="avatar">B</div>
+        <div><h2 id="profileName">@user</h2><p id="profileJoined" class="muted"></p></div>
+      </div>
+      <div id="myStats" class="profile-stats"></div>
+      <button id="changePasswordBtn" class="wide secondary">Change password</button>
+      <button id="sessionsBtn" class="wide secondary">My devices & sessions</button>
+      <button id="logoutBtn" class="wide danger">Log out</button>
+      <div id="adminBox" class="admin-box hidden">
+        <h3>Admin</h3>
+        <p class="muted">Manage users from their rank profile.</p>
+      </div>
+    </section>
+  </main>
+
+  <nav class="nav">
+    <button class="nav-item active" data-page="gamePage"><span>◉</span>Game</button>
+    <button class="nav-item" data-page="ranksPage"><span>♛</span>Ranks</button>
+    <button class="nav-item" data-page="profilePage"><span>●</span>Profile</button>
+  </nav>
+</section>
+
+<div id="modal" class="modal hidden">
+  <div class="modal-bg"></div>
+  <div class="modal-card">
+    <button id="modalClose" class="modal-close">×</button>
+    <div id="modalBody"></div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="assets/config.js"></script>
+<script src="assets/app.js"></script>
+</body>
 </html>
