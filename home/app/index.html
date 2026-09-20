@@ -20,36 +20,86 @@
 </script>
 
 <script>
-/* ========== STRONG CLIENT ANTI-BOT GATE (no game logic changes) ========== */
+/* ========== ULTRA CLIENT ANTI-BOT GATE v3 (game logic untouched) ========== */
 (function(){
+  'use strict';
   try {
-    // Block obvious automation
-    if (navigator.webdriver === true) {
-      document.documentElement.innerHTML = '<body style="background:#000;color:#fff;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0"><div style="text-align:center"><h2>Access restricted</h2><p>Automated clients are not allowed.</p></div></body>';
-      return;
+    var blocked = false;
+    function kill(msg){
+      if(blocked) return;
+      blocked = true;
+      try {
+        document.documentElement.innerHTML = '<body style="margin:0;background:#000;color:#e7e9ea;font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;text-align:center;padding:24px"><div><div style="font-size:42px;margin-bottom:12px">🛡️</div><h2 style="margin:0 0 8px">Access restricted</h2><p style="color:#71767b;max-width:320px;line-height:1.5">'+(msg||'Automated clients are not allowed.')+'</p></div></body>';
+      } catch(e) {}
     }
-    // Require valid session token shape
+
+    // 1) WebDriver / automation globals
+    if (navigator.webdriver === true) return kill('Automated client detected (webdriver).');
+    var suspects = ['__webdriver_evaluate','__selenium_evaluate','__webdriver_script_function','__driver_evaluate','__fxdriver_evaluate','_Selenium_IDE_Recorder','callPhantom','_phantom','__nightmare','domAutomation','domAutomationController','__playwright','cdc_adoQpoasnfa76pfcZLmcfl_Array'];
+    for (var i=0;i<suspects.length;i++){
+      try { if (window[suspects[i]] || document[suspects[i]]) return kill('Automation toolkit detected.'); } catch(e){}
+    }
+
+    // 2) Headless-ish signals
+    try {
+      if (window.outerWidth === 0 && window.outerHeight === 0) return kill('Invalid browser environment.');
+    } catch(e){}
+    try {
+      if ((!navigator.languages || navigator.languages.length === 0) && (!navigator.plugins || navigator.plugins.length === 0)) {
+        // soft: only kill if also no touch and tiny concurrency weirdness
+        if ((navigator.hardwareConcurrency || 0) === 0) return kill('Suspicious browser fingerprint.');
+      }
+    } catch(e){}
+
+    // 3) Session must look real
     var uid = null;
     try { uid = localStorage.getItem('gz_user_id'); } catch(e) {}
-    if (!uid || uid.length < 8) {
-      // original gate already redirects; keep consistent
-    }
-    // Soft rate: prevent extremely rapid page reloads that bots use
+    // original auth gate already redirects if missing — keep that behavior
+
+    // 4) Rapid reload / scripted refresh protection
     try {
-      var k = 'gz_last_boot';
       var now = Date.now();
-      var last = parseInt(localStorage.getItem(k) || '0', 10);
-      if (last && (now - last) < 400) {
-        // too fast consecutive loads
-        console.warn('rate');
+      var k = 'gz_boot_times';
+      var arr = [];
+      try { arr = JSON.parse(localStorage.getItem(k) || '[]'); } catch(e) { arr = []; }
+      if (!Array.isArray(arr)) arr = [];
+      arr = arr.filter(function(t){ return now - t < 15000; });
+      arr.push(now);
+      localStorage.setItem(k, JSON.stringify(arr.slice(-12)));
+      if (arr.length >= 8) {
+        // 8 loads in 15s = almost certainly a bot loop
+        return kill('Too many rapid reloads. Slow down.');
       }
-      localStorage.setItem(k, String(now));
-    } catch(e) {}
-  } catch (e) {}
+    } catch(e){}
+
+    // 5) Periodic soft re-check (does not touch game APIs)
+    var checks = 0;
+    setInterval(function(){
+      if (blocked) return;
+      checks++;
+      try {
+        if (navigator.webdriver === true) return kill('Automated client detected.');
+      } catch(e){}
+      // If user wiped storage while page open, bounce
+      try {
+        if (checks > 2 && !localStorage.getItem('gz_user_id')) {
+          // let original patterns handle navigation; don't force here
+        }
+      } catch(e){}
+    }, 12000);
+
+    // 6) Require some real user activity before heavy actions (global flag for optional use)
+    window.__gzHumanScore = 0;
+    function bump(n){ window.__gzHumanScore = Math.min(200, (window.__gzHumanScore||0) + (n||1)); }
+    ['pointerdown','keydown','touchstart','scroll'].forEach(function(ev){
+      window.addEventListener(ev, function(){ bump(2); }, {passive:true});
+    });
+    window.addEventListener('pointermove', function(){ bump(0.2); }, {passive:true});
+  } catch (e) {
+    // never break the app on gate error
+  }
 })();
 </script>
-
-
 
 
 <meta charset="UTF-8">
