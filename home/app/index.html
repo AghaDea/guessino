@@ -20,7 +20,7 @@
 </script>
 
 <script>
-/* ========== ULTRA CLIENT ANTI-BOT GATE v3.1 + 80min bot ban ========== */
+/* ========== ANTI-BOT GATE v3.2 — hard signals only (no false positives) ========== */
 (function(){
   'use strict';
   var BOT_BAN_MS = 80 * 60 * 1000;
@@ -28,14 +28,20 @@
   var BOT_BAN_REASON_KEY = 'gz_bot_ban_reason';
   var BOT_BAN_MSG = 'کیرم دهنت ربات مادر‌جندهٔ کس‌کش — ۸۰ دقیقه برو گمشو، هیچی برات کار نمی‌کنه.';
 
+  // One-time clear of previous over-aggressive bans
+  try {
+    if (localStorage.getItem('gz_ban_fp_cleared_v31') !== '1') {
+      localStorage.setItem('gz_ban_fp_cleared_v31', '1');
+      localStorage.removeItem(BOT_BAN_KEY);
+      localStorage.removeItem(BOT_BAN_REASON_KEY);
+    }
+  } catch(e){}
+
   function getBotBanUntil(){
     try{
       var v = parseInt(localStorage.getItem(BOT_BAN_KEY) || '0', 10);
       return (v && v > Date.now()) ? v : 0;
     }catch(e){ return 0; }
-  }
-  function isBotBanned(){
-    return getBotBanUntil() > Date.now();
   }
   function applyBotBan(reason){
     var until = Date.now() + BOT_BAN_MS;
@@ -49,15 +55,14 @@
   function showBotBan(reason){
     var until = getBotBanUntil();
     var mins = until ? Math.max(1, Math.ceil((until - Date.now()) / 60000)) : 80;
-    var msg = BOT_BAN_MSG;
     try {
       document.documentElement.style.pointerEvents = 'none';
-      document.documentElement.innerHTML = '<body style="margin:0;background:#0a0505;color:#f5e6d0;font-family:Tahoma,Arial,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;text-align:center;padding:24px"><div style="max-width:420px"><div style="font-size:56px;margin-bottom:12px">🚫</div><div style="font-size:20px;font-weight:900;line-height:1.55;color:#ff6b6b;margin-bottom:14px">'+msg+'</div><div style="font-size:14px;color:#c9a227;margin-bottom:8px">محرومیت موقت: حدود '+mins+' دقیقه باقی مانده</div><div style="font-size:12px;color:#9a8b72;line-height:1.6">ربات تشخیص داده شد. تا پایان محرومیت هیچ گزینه‌ای فعال نیست.<br>دلیل: '+String(reason||'automation').replace(/[<>&]/g,'')+'</div></div></body>';
+      document.documentElement.innerHTML = '<body style="margin:0;background:#0a0505;color:#f5e6d0;font-family:Tahoma,Arial,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;text-align:center;padding:24px"><div style="max-width:420px"><div style="font-size:56px;margin-bottom:12px">🚫</div><div style="font-size:20px;font-weight:900;line-height:1.55;color:#ff6b6b;margin-bottom:14px">'+BOT_BAN_MSG+'</div><div style="font-size:14px;color:#c9a227;margin-bottom:8px">محرومیت موقت: حدود '+mins+' دقیقه باقی مانده</div><div style="font-size:12px;color:#9a8b72;line-height:1.6">ربات تشخیص داده شد. تا پایان محرومیت هیچ گزینه‌ای فعال نیست.<br>دلیل: '+String(reason||'automation').replace(/[<>&]/g,'')+'</div></div></body>';
     } catch(e) {}
   }
 
   try {
-    // If already banned from a previous detection — lock everything immediately
+    // Honor existing HARD ban only
     try {
       var exp = parseInt(localStorage.getItem(BOT_BAN_KEY) || '0', 10);
       if (exp && exp <= Date.now()) {
@@ -69,62 +74,43 @@
       }
     } catch(e){}
 
-    function kill(msg, reason){
-      applyBotBan(reason || msg || 'automation');
+    // HARD signals only
+    if (navigator.webdriver === true) {
+      applyBotBan('webdriver');
+      return;
     }
-
-    if (navigator.webdriver === true) return kill('Automated client detected (webdriver).', 'webdriver');
-    var suspects = ['__webdriver_evaluate','__selenium_evaluate','__webdriver_script_function','__driver_evaluate','__fxdriver_evaluate','_Selenium_IDE_Recorder','callPhantom','_phantom','__nightmare','domAutomation','domAutomationController','__playwright','cdc_adoQpoasnfa76pfcZLmcfl_Array'];
+    var suspects = [
+      '__webdriver_evaluate','__selenium_evaluate','__webdriver_script_function',
+      '__driver_evaluate','__fxdriver_evaluate','_Selenium_IDE_Recorder',
+      'callPhantom','_phantom','__nightmare','domAutomation','domAutomationController',
+      '__playwright_evaluation_script__'
+    ];
     for (var i=0;i<suspects.length;i++){
-      try { if (window[suspects[i]] || document[suspects[i]]) return kill('Automation toolkit detected.', 'toolkit:'+suspects[i]); } catch(e){}
-    }
-
-    try {
-      if (window.outerWidth === 0 && window.outerHeight === 0) return kill('Invalid browser environment.', 'zero_outer');
-    } catch(e){}
-    try {
-      if ((!navigator.languages || navigator.languages.length === 0) && (!navigator.plugins || navigator.plugins.length === 0)) {
-        if ((navigator.hardwareConcurrency || 0) === 0) return kill('Suspicious browser fingerprint.', 'empty_fp');
-      }
-    } catch(e){}
-
-    // Rapid reload protection → hard ban
-    try {
-      var now = Date.now();
-      var k = 'gz_boot_times';
-      var arr = [];
-      try { arr = JSON.parse(localStorage.getItem(k) || '[]'); } catch(e) { arr = []; }
-      if (!Array.isArray(arr)) arr = [];
-      arr = arr.filter(function(t){ return now - t < 15000; });
-      arr.push(now);
-      localStorage.setItem(k, JSON.stringify(arr.slice(-12)));
-      if (arr.length >= 8) {
-        return kill('Too many rapid reloads.', 'rapid_reload');
-      }
-    } catch(e){}
-
-    var checks = 0;
-    setInterval(function(){
-      checks++;
       try {
-        if (navigator.webdriver === true) return kill('Automated client detected.', 'webdriver_periodic');
-        // re-check ban (in case set in another tab)
-        var u = parseInt(localStorage.getItem(BOT_BAN_KEY) || '0', 10);
-        if (u && u > Date.now()) {
-          showBotBan(localStorage.getItem(BOT_BAN_REASON_KEY) || 'automation');
+        if (window[suspects[i]] || document[suspects[i]]) {
+          applyBotBan('toolkit:'+suspects[i]);
+          return;
         }
       } catch(e){}
-    }, 10000);
+    }
+    try {
+      var keys = Object.keys(document);
+      for (var j=0;j<keys.length;j++){
+        if (/^\$cdc_/.test(keys[j]) || keys[j] === '$chrome_asyncScriptInfo') {
+          applyBotBan('cdc');
+          return;
+        }
+      }
+    } catch(e){}
 
+    // Soft human score only (never bans)
     window.__gzHumanScore = 0;
     function bump(n){ window.__gzHumanScore = Math.min(200, (window.__gzHumanScore||0) + (n||1)); }
     ['pointerdown','keydown','touchstart','scroll'].forEach(function(ev){
       window.addEventListener(ev, function(){ bump(2); }, {passive:true});
     });
     window.addEventListener('pointermove', function(){ bump(0.2); }, {passive:true});
-  } catch (e) {
-    // never break the app on gate error
-  }
+  } catch (e) {}
 })();
 </script>
 
