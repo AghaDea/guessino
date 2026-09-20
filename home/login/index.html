@@ -6,6 +6,7 @@
 <title>Guessino · Login</title>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
+
 /* ========== RED DEAD REDEMPTION theme — visual only ========== */
 @import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700;900&family=EB+Garamond:ital,wght@0,400;0,600;0,700;1,400&display=swap');
 
@@ -224,9 +225,11 @@ html[data-theme="light"] .puzzle-board{background:#e8dcc8;border-color:var(--bor
 html[data-theme="light"] .loading-wrap{background:var(--bg);}
 html[data-theme="light"] .ban-card{background:var(--bg-elev);}
 html[data-theme="light"] .err-msg{background:rgba(139,26,26,.1);color:#8b1a1a;border-color:rgba(139,26,26,.3);}
+
 </style>
 </head>
 <body>
+
 <div id="app">
   <div id="loadingScreen" class="loading-wrap">
     <div class="spinner"></div>
@@ -282,33 +285,69 @@ async function sha256(str){
   const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
   return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
 }
-/* ---------- Strong device fingerprint (hard to bypass device ban) ---------- */
+
+
+/* ========== HARDENED ANTI-BOT + STRONG PUZZLE CAPTCHA v2 ========== */
+const AUTH_OPENED_AT = Date.now();
+const MIN_FORM_MS = 3200;
+const MAX_ACCOUNTS_PER_DEVICE_24H = 2;
+const MAX_ACCOUNTS_PER_DEVICE_TOTAL = 3;
+const MAX_FAILED_ATTEMPTS = 5;
+const LOCKOUT_MS = 90000;
+let failCount = 0;
+let lockUntil = 0;
+
+// Stronger device signals
 function collectDeviceSignals(){
   const nav = navigator || {};
   const scr = window.screen || {};
   const tz = (()=>{ try{ return Intl.DateTimeFormat().resolvedOptions().timeZone || ''; }catch(e){ return ''; }})();
-  let canvasHash = '';
+  let canvasHash = '', webglHash = '', audioHash = '';
   try{
     const c = document.createElement('canvas');
-    c.width = 200; c.height = 50;
+    c.width = 280; c.height = 60;
     const ctx = c.getContext('2d');
     if(ctx){
       ctx.textBaseline = 'top';
-      ctx.font = '14px Arial';
+      ctx.font = '16px "Segoe UI"';
       ctx.fillStyle = '#f60';
-      ctx.fillRect(0,0,200,50);
+      ctx.fillRect(0,0,280,60);
       ctx.fillStyle = '#069';
-      ctx.fillText('Guessino-FP-'+nav.language, 2, 2);
+      ctx.fillText('Guessino-FP-'+nav.language+'-'+Date.now().toString(36).slice(-4), 2, 2);
       ctx.fillStyle = 'rgba(102,204,0,0.7)';
-      ctx.fillText('fp', 4, 20);
-      canvasHash = c.toDataURL().slice(-64);
+      ctx.fillText('fp-v2', 4, 22);
+      ctx.strokeStyle = '#c45c26';
+      ctx.beginPath(); ctx.arc(140,30,18,0,Math.PI*2); ctx.stroke();
+      canvasHash = c.toDataURL().slice(-80);
+    }
+  }catch(e){}
+  try{
+    const c = document.createElement('canvas');
+    const gl = c.getContext('webgl') || c.getContext('experimental-webgl');
+    if(gl){
+      const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+      const vendor = dbg ? gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL) : '';
+      const renderer = dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : '';
+      webglHash = (vendor+'|'+renderer+'|'+gl.getParameter(gl.VERSION)).slice(0,120);
+    }
+  }catch(e){}
+  try{
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if(AC){
+      const ctx = new AC();
+      const osc = ctx.createOscillator();
+      const an = ctx.createAnalyser();
+      osc.connect(an); an.connect(ctx.destination);
+      osc.start(0); const freq = an.frequencyBinCount;
+      osc.stop(); ctx.close();
+      audioHash = String(freq);
     }
   }catch(e){}
   return {
-    ua: (nav.userAgent || '').slice(0, 300),
-    platform: nav.platform || nav.userAgentData?.platform || '',
+    ua: (nav.userAgent || '').slice(0, 320),
+    platform: nav.platform || (nav.userAgentData && nav.userAgentData.platform) || '',
     language: nav.language || '',
-    languages: (nav.languages || []).slice(0,5).join(','),
+    languages: (nav.languages || []).slice(0,6).join(','),
     screen: (scr.width||0)+'x'+(scr.height||0)+'@'+(window.devicePixelRatio||1),
     colorDepth: scr.colorDepth || 0,
     timezone: tz,
@@ -317,7 +356,12 @@ function collectDeviceSignals(){
     touch: ('ontouchstart' in window) || (nav.maxTouchPoints > 0),
     maxTouch: nav.maxTouchPoints || 0,
     vendor: nav.vendor || '',
-    canvas: canvasHash
+    canvas: canvasHash,
+    webgl: webglHash,
+    audio: audioHash,
+    plugins: (nav.plugins ? nav.plugins.length : 0),
+    cookie: navigator.cookieEnabled ? 1 : 0,
+    doNotTrack: nav.doNotTrack || ''
   };
 }
 
@@ -326,7 +370,6 @@ async function hashFingerprint(str){
     const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
     return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
   }catch(e){
-    // fallback simple hash
     let h = 0;
     for(let i=0;i<str.length;i++){ h = ((h<<5)-h)+str.charCodeAt(i); h|=0; }
     return 'fb'+Math.abs(h).toString(16)+str.length.toString(16);
@@ -335,21 +378,20 @@ async function hashFingerprint(str){
 
 async function buildDeviceId(){
   const sig = collectDeviceSignals();
-  // stable core signals (changing browser minor version shouldn't always reset)
   const core = [
     sig.platform, sig.language, sig.screen, sig.timezone,
     String(sig.cores), String(sig.memory), String(sig.touch),
-    String(sig.maxTouch), sig.vendor, sig.canvas, sig.colorDepth
+    String(sig.maxTouch), sig.vendor, sig.canvas, sig.webgl, sig.audio,
+    String(sig.colorDepth), String(sig.plugins)
   ].join('|');
   const fp = await hashFingerprint(core);
-  // keep a local seed so even similar phones get unique id when possible
   let seed = null;
   try{ seed = localStorage.getItem('gz_device_seed'); }catch(e){}
   if(!seed){
     seed = (crypto.randomUUID ? crypto.randomUUID() : ('s'+Math.random().toString(36).slice(2)+Date.now()));
     try{ localStorage.setItem('gz_device_seed', seed); }catch(e){}
   }
-  const combined = await hashFingerprint(fp + '::' + seed);
+  const combined = await hashFingerprint(fp + '::' + seed + '::' + (sig.ua||'').slice(0,40));
   try{ localStorage.setItem('gz_device_id', combined); }catch(e){}
   return { id: combined, signals: sig, coreFp: fp };
 }
@@ -371,6 +413,256 @@ function getDeviceId(){
     if(cached){ DEVICE_ID = cached; return cached; }
   }catch(e){}
   return 'unknown';
+}
+
+/* ---------- Strong multi-layer puzzle CAPTCHA ---------- */
+let PUZZLE={x:0,y:0,targetX:0,targetY:0,size:42,drag:false,offX:0,offY:0,solved:false,started:0,moved:0,moveEvents:0,lastX:0,lastY:0,dirChanges:0,lastDir:0,path:[],velocitySamples:[],pointerType:''};
+
+function puzzleRand(a,b){return Math.floor(Math.random()*(b-a+1))+a}
+function puzzleStatus(t,c=''){const e=$('puzzleStatus');if(e){e.textContent=t||'';e.className='puzzle-status'+(c?' '+c:'')}}
+
+function puzzleMakeImage(){
+  const b=$('puzzleBoard'),c=$('puzzleCanvas'),p=$('puzzlePiece'),t=$('puzzleTarget');
+  if(!b||!c||!p||!t)return;
+  const w=Math.max(220,b.clientWidth),h=118,s=puzzleRand(40,50);
+  PUZZLE.size=s;c.width=w*2;c.height=h*2;
+  const x=c.getContext('2d');x.setTransform(2,0,0,2,0,0);
+  const palettes=[['#172554','#0f766e','#7c3aed'],['#3f1d2e','#164e63','#854d0e'],['#172033','#3f6212','#7e22ce'],['#1e293b','#075985','#9f1239'],['#451a03','#7c2d12','#b45309']];
+  const q=palettes[Math.floor(Math.random()*palettes.length)],g=x.createLinearGradient(0,0,w,h);
+  g.addColorStop(0,q[0]);g.addColorStop(.5,q[1]);g.addColorStop(1,q[2]);
+  x.fillStyle=g;x.fillRect(0,0,w,h);
+  for(let i=0;i<55;i++){
+    x.fillStyle='rgba(255,255,255,'+(Math.random()*.09)+')';
+    x.beginPath();x.arc(Math.random()*w,Math.random()*h,2+Math.random()*18,0,Math.PI*2);x.fill();
+  }
+  // noise lines
+  for(let i=0;i<8;i++){
+    x.strokeStyle='rgba(255,255,255,'+(0.04+Math.random()*0.06)+')';
+    x.lineWidth=1+Math.random()*2;
+    x.beginPath();x.moveTo(Math.random()*w,Math.random()*h);x.lineTo(Math.random()*w,Math.random()*h);x.stroke();
+  }
+  const minX=8,maxX=Math.max(8,w-s-8),minY=8,maxY=Math.max(8,h-s-8);
+  PUZZLE.targetX=puzzleRand(minX,maxX);PUZZLE.targetY=puzzleRand(minY,maxY);
+  let px=puzzleRand(minX,maxX),py=puzzleRand(minY,maxY);
+  for(let i=0;i<12&&Math.hypot(px-PUZZLE.targetX,py-PUZZLE.targetY)<75;i++){
+    px=puzzleRand(minX,maxX);py=puzzleRand(minY,maxY);
+  }
+  PUZZLE.x=px;PUZZLE.y=py;PUZZLE.solved=false;PUZZLE.drag=false;
+  PUZZLE.started=0;PUZZLE.moved=0;PUZZLE.moveEvents=0;PUZZLE.dirChanges=0;PUZZLE.lastDir=0;
+  PUZZLE.lastX=px;PUZZLE.lastY=py;PUZZLE.path=[];PUZZLE.velocitySamples=[];PUZZLE.pointerType='';
+  t.style.left=PUZZLE.targetX+'px';t.style.top=PUZZLE.targetY+'px';
+  t.style.width=s+'px';t.style.height=s+'px';
+  const o=document.createElement('canvas');o.width=s;o.height=s;
+  o.getContext('2d').drawImage(c,PUZZLE.targetX*2,PUZZLE.targetY*2,s*2,s*2,0,0,s,s);
+  p.style.width=s+'px';p.style.height=s+'px';
+  p.style.backgroundImage='url('+o.toDataURL('image/png')+')';
+  p.style.top=py+'px';puzzleSetX(px);puzzleStatus('');
+}
+
+function puzzleSetPos(x,y){
+  const b=$('puzzleBoard'),p=$('puzzlePiece');if(!b||!p)return;
+  const maxX=Math.max(0,b.clientWidth-PUZZLE.size),maxY=Math.max(0,b.clientHeight-PUZZLE.size);
+  PUZZLE.x=Math.max(0,Math.min(maxX,x));PUZZLE.y=Math.max(0,Math.min(maxY,y));
+  p.style.left=PUZZLE.x+'px';p.style.top=PUZZLE.y+'px';
+}
+function puzzleSetX(v){puzzleSetPos(v,PUZZLE.y)}
+
+function puzzleDown(e){
+  const p=$('puzzlePiece');if(!p||PUZZLE.solved)return;
+  const r=p.getBoundingClientRect();
+  if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)return;
+  e.preventDefault();
+  PUZZLE.drag=true;PUZZLE.started=performance.now();
+  PUZZLE.offX=e.clientX-r.left;PUZZLE.offY=e.clientY-r.top;
+  PUZZLE.moved=0;PUZZLE.moveEvents=0;PUZZLE.dirChanges=0;PUZZLE.lastDir=0;
+  PUZZLE.lastX=PUZZLE.x;PUZZLE.lastY=PUZZLE.y;
+  PUZZLE.path=[{x:PUZZLE.x,y:PUZZLE.y,t:PUZZLE.started}];
+  PUZZLE.velocitySamples=[];
+  PUZZLE.pointerType = e.pointerType || 'unknown';
+  p.classList.add('dragging');
+  try{p.setPointerCapture(e.pointerId)}catch(_){}
+}
+
+function puzzleMove(e){
+  if(!PUZZLE.drag)return;
+  e.preventDefault();
+  const r=$('puzzleBoard').getBoundingClientRect();
+  const nx=e.clientX-r.left-PUZZLE.offX, ny=e.clientY-r.top-PUZZLE.offY;
+  const now=performance.now();
+  const dx=nx-PUZZLE.lastX, dy=ny-PUZZLE.lastY;
+  const dist=Math.hypot(nx-PUZZLE.x,ny-PUZZLE.y);
+  PUZZLE.moved+=dist;
+  PUZZLE.moveEvents++;
+  if(Math.abs(dx)>0.35){
+    const dir=dx>0?1:-1;
+    if(PUZZLE.lastDir&&dir!==PUZZLE.lastDir)PUZZLE.dirChanges++;
+    PUZZLE.lastDir=dir;
+  }
+  if(PUZZLE.path.length){
+    const last=PUZZLE.path[PUZZLE.path.length-1];
+    const dt=Math.max(1,now-last.t);
+    const v=dist/(dt/1000);
+    PUZZLE.velocitySamples.push(v);
+    if(PUZZLE.velocitySamples.length>40)PUZZLE.velocitySamples.shift();
+  }
+  PUZZLE.path.push({x:nx,y:ny,t:now});
+  if(PUZZLE.path.length>80)PUZZLE.path.shift();
+  PUZZLE.lastX=nx;PUZZLE.lastY=ny;
+  puzzleSetPos(nx,ny);
+}
+
+function puzzleUp(){
+  if(PUZZLE.drag){
+    PUZZLE.drag=false;
+    const p=$('puzzlePiece');
+    if(p)p.classList.remove('dragging');
+  }
+}
+
+function resetPuzzleCaptcha(){ puzzleMakeImage(); }
+
+function analyzeHumanMotion(){
+  // Returns null if OK, or error string
+  if(!PUZZLE.started||PUZZLE.moved<28||PUZZLE.moveEvents<8){
+    return 'Drag the piece naturally with your finger or mouse.';
+  }
+  const elapsed=performance.now()-PUZZLE.started;
+  if(elapsed<280||elapsed>90000){
+    return 'Please move the piece at a natural speed.';
+  }
+  // Too perfectly linear / constant velocity = bot
+  if(PUZZLE.velocitySamples.length>=6){
+    const vs=PUZZLE.velocitySamples;
+    const mean=vs.reduce((a,b)=>a+b,0)/vs.length;
+    const variance=vs.reduce((a,v)=>a+(v-mean)*(v-mean),0)/vs.length;
+    const std=Math.sqrt(variance);
+    // human has variance; pure script often near-zero or extreme
+    if(mean>0.1 && std/mean < 0.08 && PUZZLE.dirChanges===0 && PUZZLE.path.length>15){
+      return 'Movement looks automated. Try again more naturally.';
+    }
+  }
+  // Path must not be a perfect straight line
+  if(PUZZLE.path.length>=10){
+    const first=PUZZLE.path[0], last=PUZZLE.path[PUZZLE.path.length-1];
+    const totalDist=Math.hypot(last.x-first.x,last.y-first.y);
+    let pathLen=0;
+    for(let i=1;i<PUZZLE.path.length;i++){
+      pathLen+=Math.hypot(PUZZLE.path[i].x-PUZZLE.path[i-1].x,PUZZLE.path[i].y-PUZZLE.path[i-1].y);
+    }
+    if(totalDist>20 && pathLen/totalDist < 1.02 && PUZZLE.dirChanges===0){
+      return 'Please drag with a more natural path.';
+    }
+  }
+  return null;
+}
+
+function checkPuzzleCaptcha(){
+  if(PUZZLE.solved)return null;
+  const motionErr=analyzeHumanMotion();
+  if(motionErr){
+    puzzleStatus(motionErr,'bad');
+    return motionErr;
+  }
+  const dx=PUZZLE.x-PUZZLE.targetX, dy=PUZZLE.y-PUZZLE.targetY;
+  if(Math.hypot(dx,dy)<=8){
+    PUZZLE.solved=true;
+    puzzleSetPos(PUZZLE.targetX,PUZZLE.targetY);
+    puzzleStatus('Verified ✓','ok');
+    return null;
+  }
+  puzzleStatus('Wrong position — try again.','bad');
+  resetPuzzleCaptcha();
+  return 'Puzzle verification failed — try again';
+}
+
+async function logAntiBot(action, details){
+  if(!sb) return;
+  try{
+    await sb.from('audit_log').insert({
+      actor_id: null,
+      actor_username: 'SYSTEM',
+      action: action || 'anti_bot',
+      target_username: details && details.username || null,
+      target_device_id: DEVICE_ID || null,
+      details: Object.assign({ source: 'signup', ua: (navigator.userAgent||'').slice(0,120) }, details || {})
+    });
+  }catch(e){ console.warn('anti_bot log', e); }
+}
+
+async function deleteUserHard(userId){
+  if(!sb || !userId) return;
+  try{
+    await sb.from('devices').delete().eq('user_id', userId);
+    await sb.from('users').delete().eq('id', userId);
+  }catch(e){ console.warn('delete user', e); }
+}
+
+async function countDeviceAccounts(){
+  if(!sb || !DEVICE_ID) return { day: 0, total: 0 };
+  try{
+    const since = new Date(Date.now() - 24*60*60*1000).toISOString();
+    const { data: all } = await sb.from('users').select('id,created_at').eq('device_id', DEVICE_ID);
+    const rows = all || [];
+    const day = rows.filter(u => u.created_at && u.created_at >= since).length;
+    return { day, total: rows.length };
+  }catch(e){
+    return { day: 0, total: 0 };
+  }
+}
+
+async function runAntiBotGates(username, isSignup){
+  // lockout after repeated fails
+  if(Date.now() < lockUntil){
+    return 'Too many attempts. Please wait a moment.';
+  }
+  // 0) honeypot
+  const hp = $('authWebsite');
+  if(hp && hp.value){
+    await logAntiBot('anti_bot', { username, reason: 'honeypot_filled' });
+    failCount++;
+    return 'Please try again.';
+  }
+  // 1) too fast
+  if(Date.now() - AUTH_OPENED_AT < MIN_FORM_MS){
+    await logAntiBot('anti_bot', { username, reason: 'form_too_fast', ms: Date.now()-AUTH_OPENED_AT });
+    return 'Please wait a moment and try again.';
+  }
+  // 2) no real interaction signals (headless often lacks)
+  try{
+    if(typeof navigator.webdriver !== 'undefined' && navigator.webdriver){
+      await logAntiBot('anti_bot', { username, reason: 'webdriver' });
+      return 'Automated access detected.';
+    }
+  }catch(e){}
+  // 3) device already banned
+  try{
+    const ban = await getActiveDeviceBan();
+    if(ban){
+      return 'This device is restricted.';
+    }
+  }catch(e){}
+
+  if(isSignup){
+    const counts = await countDeviceAccounts();
+    if(counts.day >= MAX_ACCOUNTS_PER_DEVICE_24H || counts.total >= MAX_ACCOUNTS_PER_DEVICE_TOTAL){
+      await logAntiBot('anti_bot_block_device', {
+        username,
+        reason: 'mass_signup',
+        accounts_24h: counts.day,
+        accounts_total: counts.total
+      });
+      return 'Registration temporarily blocked on this device.';
+    }
+  }
+  return null;
+}
+
+function recordFail(){
+  failCount++;
+  if(failCount >= MAX_FAILED_ATTEMPTS){
+    lockUntil = Date.now() + LOCKOUT_MS;
+    failCount = 0;
+  }
 }
 
 
@@ -409,8 +701,6 @@ async function withTimeout(promise, ms){
   }finally{clearTimeout(timer);}
 }
 
-
-
 async function getActiveDeviceBan(){
   const { data: devBan } = await sb.from('banned_devices').select('*').eq('device_id', DEVICE_ID).maybeSingle();
   if(devBan && (!devBan.banned_until || new Date(devBan.banned_until) > new Date())) return devBan;
@@ -436,6 +726,7 @@ function showAuth(mode){
     : `Already have an account? <a href="#" id="authSwitchLink">Log in</a>`;
   const link = $('authSwitchLink');
   if(link) link.onclick = (e)=>{ e.preventDefault(); showAuth(authMode === 'login' ? 'signup' : 'login'); };
+  resetPuzzleCaptcha();
 }
 function showDeviceBanScreen(devBan){
   hideAllScreens();
@@ -456,7 +747,6 @@ function goHome(){
     var path = location.pathname || '/';
     if (/\/index\.html$/i.test(path)) path = path.replace(/\/index\.html$/i, '/');
     else if (!path.endsWith('/')) path = path + '/';
-    // /REPO/home/login/ → /REPO/home/app/
     path = path.replace(/\/login\/$/, '/');
     location.replace(path + 'app/');
   } catch (e) {
@@ -487,97 +777,9 @@ async function finishLogin(user){
   }
   if(user.banned){ showUserBanScreen(user); return; }
   localStorage.setItem('gz_user_id', user.id);
+  try{ localStorage.setItem('gz_device_id', DEVICE_ID); }catch(e){}
   await registerCurrentDevice(user.id);
   goHome();
-}
-
-
-/* ---------- Compact drag puzzle CAPTCHA ---------- */
-let PUZZLE={x:0,y:0,targetX:0,targetY:0,size:42,drag:false,offX:0,offY:0,solved:false,started:0,moved:0,moveEvents:0,lastX:0,lastY:0,dirChanges:0,lastDir:0};
-function puzzleRand(a,b){return Math.floor(Math.random()*(b-a+1))+a}function puzzleStatus(t,c=''){const e=$('puzzleStatus');if(e){e.textContent=t||'';e.className='puzzle-status'+(c?' '+c:'')}}
-function puzzleMakeImage(){const b=$('puzzleBoard'),c=$('puzzleCanvas'),p=$('puzzlePiece'),t=$('puzzleTarget');if(!b||!c||!p||!t)return;const w=Math.max(220,b.clientWidth),h=118,s=puzzleRand(38,48);PUZZLE.size=s;c.width=w*2;c.height=h*2;const x=c.getContext('2d');x.setTransform(2,0,0,2,0,0);const palettes=[['#172554','#0f766e','#7c3aed'],['#3f1d2e','#164e63','#854d0e'],['#172033','#3f6212','#7e22ce'],['#1e293b','#075985','#9f1239']];const q=palettes[Math.floor(Math.random()*palettes.length)],g=x.createLinearGradient(0,0,w,h);g.addColorStop(0,q[0]);g.addColorStop(.5,q[1]);g.addColorStop(1,q[2]);x.fillStyle=g;x.fillRect(0,0,w,h);for(let i=0;i<45;i++){x.fillStyle='rgba(255,255,255,'+(Math.random()*.07)+')';x.beginPath();x.arc(Math.random()*w,Math.random()*h,2+Math.random()*16,0,Math.PI*2);x.fill()}const minX=8,maxX=Math.max(8,w-s-8),minY=8,maxY=Math.max(8,h-s-8);PUZZLE.targetX=puzzleRand(minX,maxX);PUZZLE.targetY=puzzleRand(minY,maxY);let px=puzzleRand(minX,maxX),py=puzzleRand(minY,maxY);for(let i=0;i<10&&Math.hypot(px-PUZZLE.targetX,py-PUZZLE.targetY)<70;i++){px=puzzleRand(minX,maxX);py=puzzleRand(minY,maxY)}PUZZLE.x=px;PUZZLE.y=py;PUZZLE.solved=false;PUZZLE.drag=false;PUZZLE.started=0;PUZZLE.moved=0;PUZZLE.moveEvents=0;PUZZLE.dirChanges=0;PUZZLE.lastDir=0;PUZZLE.lastX=px;PUZZLE.lastY=py;t.style.left=PUZZLE.targetX+'px';t.style.top=PUZZLE.targetY+'px';const o=document.createElement('canvas');o.width=s;o.height=s;o.getContext('2d').drawImage(c,PUZZLE.targetX*2,PUZZLE.targetY*2,s*2,s*2,0,0,s,s);p.style.width=s+'px';p.style.height=s+'px';p.style.backgroundImage='url('+o.toDataURL('image/png')+')';p.style.top=py+'px';puzzleSetX(px);puzzleStatus('')}
-function puzzleSetPos(x,y){const b=$('puzzleBoard'),p=$('puzzlePiece');if(!b||!p)return;const maxX=Math.max(0,b.clientWidth-PUZZLE.size),maxY=Math.max(0,b.clientHeight-PUZZLE.size);PUZZLE.x=Math.max(0,Math.min(maxX,x));PUZZLE.y=Math.max(0,Math.min(maxY,y));p.style.left=PUZZLE.x+'px';p.style.top=PUZZLE.y+'px'}
-function puzzleSetX(v){puzzleSetPos(v,PUZZLE.y)}
-function puzzleDown(e){const p=$('puzzlePiece');if(!p||PUZZLE.solved)return;const r=p.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)return;e.preventDefault();PUZZLE.drag=true;PUZZLE.started=performance.now();PUZZLE.offX=e.clientX-r.left;PUZZLE.offY=e.clientY-r.top;PUZZLE.moved=0;PUZZLE.moveEvents=0;PUZZLE.dirChanges=0;PUZZLE.lastDir=0;PUZZLE.lastX=PUZZLE.x;PUZZLE.lastY=PUZZLE.y;p.classList.add('dragging');try{p.setPointerCapture(e.pointerId)}catch(_){} }
-function puzzleMove(e){if(!PUZZLE.drag)return;e.preventDefault();const r=$('puzzleBoard').getBoundingClientRect(),nx=e.clientX-r.left-PUZZLE.offX,ny=e.clientY-r.top-PUZZLE.offY;const dx=nx-PUZZLE.lastX;PUZZLE.moved+=Math.hypot(nx-PUZZLE.x,ny-PUZZLE.y);PUZZLE.moveEvents++;if(Math.abs(dx)>0.4){const dir=dx>0?1:-1;if(PUZZLE.lastDir&&dir!==PUZZLE.lastDir)PUZZLE.dirChanges++;PUZZLE.lastDir=dir}PUZZLE.lastX=nx;PUZZLE.lastY=ny;puzzleSetPos(nx,ny)}
-function puzzleUp(){if(PUZZLE.drag){PUZZLE.drag=false;const p=$('puzzlePiece');if(p)p.classList.remove('dragging')}}
-function resetPuzzleCaptcha(){ puzzleMakeImage(); }
-function checkPuzzleCaptcha(){if(PUZZLE.solved)return null;if(!PUZZLE.started||PUZZLE.moved<20||PUZZLE.moveEvents<6){puzzleStatus('Drag the piece with your finger.','bad');return 'Please complete the puzzle verification'}const elapsed=performance.now()-PUZZLE.started;if(elapsed<220||elapsed>60000){puzzleStatus('Please move the piece naturally.','bad');resetPuzzleCaptcha();return 'Please try the puzzle again'}const dx=PUZZLE.x-PUZZLE.targetX,dy=PUZZLE.y-PUZZLE.targetY;if(Math.hypot(dx,dy)<=9){PUZZLE.solved=true;puzzleSetPos(PUZZLE.targetX,PUZZLE.targetY);puzzleStatus('Verified ✓','ok');return null}puzzleStatus('Wrong position — try again.','bad');resetPuzzleCaptcha();return 'Puzzle verification failed — try again'}
-/* ---------- Anti-bot ---------- */
-const AUTH_OPENED_AT = Date.now();
-const MIN_FORM_MS = 2500;
-const MAX_ACCOUNTS_PER_DEVICE_24H = 2;
-const MAX_ACCOUNTS_PER_DEVICE_TOTAL = 4;
-
-async function logAntiBot(action, details){
-  if(!sb) return;
-  try{
-    await sb.from('audit_log').insert({
-      actor_id: null,
-      actor_username: 'SYSTEM',
-      action: action || 'anti_bot',
-      target_username: details && details.username || null,
-      target_device_id: DEVICE_ID || null,
-      details: Object.assign({ source: 'signup' }, details || {})
-    });
-  }catch(e){ console.warn('anti_bot log', e); }
-}
-
-async function deleteUserHard(userId){
-  if(!sb || !userId) return;
-  try{
-    // best-effort cleanup
-    await sb.from('devices').delete().eq('user_id', userId);
-    await sb.from('users').delete().eq('id', userId);
-  }catch(e){ console.warn('delete user', e); }
-}
-
-async function countDeviceAccounts(){
-  if(!sb || !DEVICE_ID) return { day: 0, total: 0 };
-  try{
-    const since = new Date(Date.now() - 24*60*60*1000).toISOString();
-    const { data: all } = await sb.from('users').select('id,created_at').eq('device_id', DEVICE_ID);
-    const rows = all || [];
-    const day = rows.filter(u => u.created_at && u.created_at >= since).length;
-    return { day, total: rows.length };
-  }catch(e){
-    return { day: 0, total: 0 };
-  }
-}
-
-async function runAntiBotGates(username, isSignup){
-  // 0) honeypot field — only bots fill hidden inputs
-  const hp = $('authWebsite');
-  if(hp && hp.value){
-    await logAntiBot('anti_bot', { username, reason: 'honeypot_filled' });
-    return 'Please try again.';
-  }
-  // 1) too fast (bot)
-  if(Date.now() - AUTH_OPENED_AT < MIN_FORM_MS){
-    await logAntiBot('anti_bot', { username, reason: 'form_too_fast', ms: Date.now()-AUTH_OPENED_AT });
-    return 'Please wait a moment and try again.';
-  }
-  // 3) device already banned
-  try{
-    const ban = await getActiveDeviceBan();
-    if(ban){
-      return 'This device is restricted.';
-    }
-  }catch(e){}
-
-  if(isSignup){
-    const counts = await countDeviceAccounts();
-    if(counts.day >= MAX_ACCOUNTS_PER_DEVICE_24H || counts.total >= MAX_ACCOUNTS_PER_DEVICE_TOTAL){
-      await logAntiBot('anti_bot_block_device', {
-        username,
-        reason: 'mass_signup',
-        accounts_24h: counts.day,
-        accounts_total: counts.total
-      });
-      return 'Registration temporarily blocked on this device.';
-    }
-  }
-  return null;
 }
 
 async function submitAuth(){
@@ -587,13 +789,19 @@ async function submitAuth(){
   const btn = $('authSubmitBtn');
   errBox.classList.add('hidden');
 
+  if(Date.now() < lockUntil){
+    errBox.textContent = 'Too many attempts. Please wait a moment.';
+    errBox.classList.remove('hidden');
+    return;
+  }
+
   const uErr = validateUsername(username);
   if(uErr){ errBox.textContent=uErr; errBox.classList.remove('hidden'); return; }
   const pErr = validatePassword(password);
   if(pErr){ errBox.textContent=pErr; errBox.classList.remove('hidden'); return; }
 
   const vErr = checkPuzzleCaptcha();
-  if(vErr){ errBox.textContent=vErr; errBox.classList.remove('hidden'); return; }
+  if(vErr){ errBox.textContent=vErr; errBox.classList.remove('hidden'); recordFail(); return; }
   if(!sb){ errBox.textContent='Database is not connected. Please check your internet connection.'; errBox.classList.remove('hidden'); return; }
 
   btn.disabled = true;
@@ -603,6 +811,7 @@ async function submitAuth(){
       errBox.textContent = botMsg;
       errBox.classList.remove('hidden');
       resetPuzzleCaptcha();
+      recordFail();
       return;
     }
 
@@ -617,6 +826,7 @@ async function submitAuth(){
         errBox.textContent='This username is already taken.';
         errBox.classList.remove('hidden');
         resetPuzzleCaptcha();
+        recordFail();
         return;
       }
 
@@ -650,12 +860,14 @@ async function submitAuth(){
         errBox.textContent='Username not found.';
         errBox.classList.remove('hidden');
         resetPuzzleCaptcha();
+        recordFail();
         return;
       }
       if(user.password_hash !== hash){
         errBox.textContent='Incorrect password.';
         errBox.classList.remove('hidden');
         resetPuzzleCaptcha();
+        recordFail();
         return;
       }
       await finishLogin(user);
@@ -665,6 +877,7 @@ async function submitAuth(){
     errBox.textContent=authErrorMessage(e,'Unable to complete the request. Please try again.');
     errBox.classList.remove('hidden');
     resetPuzzleCaptcha();
+    recordFail();
   }finally{
     btn.disabled=false;
   }
@@ -735,7 +948,18 @@ async function boot(){
   }
 }
 
-(function bindPuzzleUI(){const p=$('puzzlePiece');if(p&&!p._bound){p._bound=true;p.addEventListener('pointerdown',puzzleDown,{passive:false});p.addEventListener('pointermove',puzzleMove,{passive:false});p.addEventListener('pointerup',puzzleUp,{passive:false});p.addEventListener('pointercancel',puzzleUp,{passive:false})}window.addEventListener('resize',()=>{if($('puzzleCaptcha')&&!$('authScreen').classList.contains('hidden'))puzzleMakeImage()});requestAnimationFrame(()=>requestAnimationFrame(()=>{if($('puzzleCaptcha'))puzzleMakeImage()}))})();
+(function bindPuzzleUI(){
+  const p=$('puzzlePiece');
+  if(p&&!p._bound){
+    p._bound=true;
+    p.addEventListener('pointerdown',puzzleDown,{passive:false});
+    p.addEventListener('pointermove',puzzleMove,{passive:false});
+    p.addEventListener('pointerup',puzzleUp,{passive:false});
+    p.addEventListener('pointercancel',puzzleUp,{passive:false});
+  }
+  window.addEventListener('resize',()=>{if($('puzzleCaptcha')&&!$('authScreen').classList.contains('hidden'))puzzleMakeImage()});
+  requestAnimationFrame(()=>requestAnimationFrame(()=>{if($('puzzleCaptcha'))puzzleMakeImage()}));
+})();
 
 boot();
 </script>
