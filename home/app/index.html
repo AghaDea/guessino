@@ -20,36 +20,113 @@
 </script>
 
 <script>
-/* ========== STRONG CLIENT ANTI-BOT GATE (no game logic changes) ========== */
+/* ========== ULTRA CLIENT ANTI-BOT GATE v3.1 + 80min bot ban ========== */
 (function(){
-  try {
-    // Block obvious automation
-    if (navigator.webdriver === true) {
-      document.documentElement.innerHTML = '<body style="background:#000;color:#fff;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0"><div style="text-align:center"><h2>Access restricted</h2><p>Automated clients are not allowed.</p></div></body>';
-      return;
-    }
-    // Require valid session token shape
-    var uid = null;
-    try { uid = localStorage.getItem('gz_user_id'); } catch(e) {}
-    if (!uid || uid.length < 8) {
-      // original gate already redirects; keep consistent
-    }
-    // Soft rate: prevent extremely rapid page reloads that bots use
+  'use strict';
+  var BOT_BAN_MS = 80 * 60 * 1000;
+  var BOT_BAN_KEY = 'gz_bot_ban_until';
+  var BOT_BAN_REASON_KEY = 'gz_bot_ban_reason';
+  var BOT_BAN_MSG = 'کیرم دهنت ربات مادر‌جندهٔ کس‌کش — ۸۰ دقیقه برو گمشو، هیچی برات کار نمی‌کنه.';
+
+  function getBotBanUntil(){
+    try{
+      var v = parseInt(localStorage.getItem(BOT_BAN_KEY) || '0', 10);
+      return (v && v > Date.now()) ? v : 0;
+    }catch(e){ return 0; }
+  }
+  function isBotBanned(){
+    return getBotBanUntil() > Date.now();
+  }
+  function applyBotBan(reason){
+    var until = Date.now() + BOT_BAN_MS;
+    try{
+      localStorage.setItem(BOT_BAN_KEY, String(until));
+      localStorage.setItem(BOT_BAN_REASON_KEY, String(reason || 'automation'));
+      localStorage.removeItem('gz_user_id');
+    }catch(e){}
+    showBotBan(reason);
+  }
+  function showBotBan(reason){
+    var until = getBotBanUntil();
+    var mins = until ? Math.max(1, Math.ceil((until - Date.now()) / 60000)) : 80;
+    var msg = BOT_BAN_MSG;
     try {
-      var k = 'gz_last_boot';
-      var now = Date.now();
-      var last = parseInt(localStorage.getItem(k) || '0', 10);
-      if (last && (now - last) < 400) {
-        // too fast consecutive loads
-        console.warn('rate');
-      }
-      localStorage.setItem(k, String(now));
+      document.documentElement.style.pointerEvents = 'none';
+      document.documentElement.innerHTML = '<body style="margin:0;background:#0a0505;color:#f5e6d0;font-family:Tahoma,Arial,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;text-align:center;padding:24px"><div style="max-width:420px"><div style="font-size:56px;margin-bottom:12px">🚫</div><div style="font-size:20px;font-weight:900;line-height:1.55;color:#ff6b6b;margin-bottom:14px">'+msg+'</div><div style="font-size:14px;color:#c9a227;margin-bottom:8px">محرومیت موقت: حدود '+mins+' دقیقه باقی مانده</div><div style="font-size:12px;color:#9a8b72;line-height:1.6">ربات تشخیص داده شد. تا پایان محرومیت هیچ گزینه‌ای فعال نیست.<br>دلیل: '+String(reason||'automation').replace(/[<>&]/g,'')+'</div></div></body>';
     } catch(e) {}
-  } catch (e) {}
+  }
+
+  try {
+    // If already banned from a previous detection — lock everything immediately
+    try {
+      var exp = parseInt(localStorage.getItem(BOT_BAN_KEY) || '0', 10);
+      if (exp && exp <= Date.now()) {
+        localStorage.removeItem(BOT_BAN_KEY);
+        localStorage.removeItem(BOT_BAN_REASON_KEY);
+      } else if (exp && exp > Date.now()) {
+        showBotBan(localStorage.getItem(BOT_BAN_REASON_KEY) || 'automation');
+        return;
+      }
+    } catch(e){}
+
+    function kill(msg, reason){
+      applyBotBan(reason || msg || 'automation');
+    }
+
+    if (navigator.webdriver === true) return kill('Automated client detected (webdriver).', 'webdriver');
+    var suspects = ['__webdriver_evaluate','__selenium_evaluate','__webdriver_script_function','__driver_evaluate','__fxdriver_evaluate','_Selenium_IDE_Recorder','callPhantom','_phantom','__nightmare','domAutomation','domAutomationController','__playwright','cdc_adoQpoasnfa76pfcZLmcfl_Array'];
+    for (var i=0;i<suspects.length;i++){
+      try { if (window[suspects[i]] || document[suspects[i]]) return kill('Automation toolkit detected.', 'toolkit:'+suspects[i]); } catch(e){}
+    }
+
+    try {
+      if (window.outerWidth === 0 && window.outerHeight === 0) return kill('Invalid browser environment.', 'zero_outer');
+    } catch(e){}
+    try {
+      if ((!navigator.languages || navigator.languages.length === 0) && (!navigator.plugins || navigator.plugins.length === 0)) {
+        if ((navigator.hardwareConcurrency || 0) === 0) return kill('Suspicious browser fingerprint.', 'empty_fp');
+      }
+    } catch(e){}
+
+    // Rapid reload protection → hard ban
+    try {
+      var now = Date.now();
+      var k = 'gz_boot_times';
+      var arr = [];
+      try { arr = JSON.parse(localStorage.getItem(k) || '[]'); } catch(e) { arr = []; }
+      if (!Array.isArray(arr)) arr = [];
+      arr = arr.filter(function(t){ return now - t < 15000; });
+      arr.push(now);
+      localStorage.setItem(k, JSON.stringify(arr.slice(-12)));
+      if (arr.length >= 8) {
+        return kill('Too many rapid reloads.', 'rapid_reload');
+      }
+    } catch(e){}
+
+    var checks = 0;
+    setInterval(function(){
+      checks++;
+      try {
+        if (navigator.webdriver === true) return kill('Automated client detected.', 'webdriver_periodic');
+        // re-check ban (in case set in another tab)
+        var u = parseInt(localStorage.getItem(BOT_BAN_KEY) || '0', 10);
+        if (u && u > Date.now()) {
+          showBotBan(localStorage.getItem(BOT_BAN_REASON_KEY) || 'automation');
+        }
+      } catch(e){}
+    }, 10000);
+
+    window.__gzHumanScore = 0;
+    function bump(n){ window.__gzHumanScore = Math.min(200, (window.__gzHumanScore||0) + (n||1)); }
+    ['pointerdown','keydown','touchstart','scroll'].forEach(function(ev){
+      window.addEventListener(ev, function(){ bump(2); }, {passive:true});
+    });
+    window.addEventListener('pointermove', function(){ bump(0.2); }, {passive:true});
+  } catch (e) {
+    // never break the app on gate error
+  }
 })();
 </script>
-
-
 
 
 <meta charset="UTF-8">
