@@ -357,7 +357,19 @@ function showBotBanScreen(reason){
     try{ document.body.innerHTML = html; }catch(_){}
   }
 }
+
+function clearFalsePositiveBansOnce(){
+  try{
+    if(localStorage.getItem('gz_ban_fp_cleared_v31') === '1') return;
+    localStorage.setItem('gz_ban_fp_cleared_v31', '1');
+    // clear any previous over-aggressive bans so real users can enter again
+    localStorage.removeItem('gz_bot_ban_until');
+    localStorage.removeItem('gz_bot_ban_reason');
+  }catch(e){}
+}
+
 function enforceBotBanOnBoot(){
+  clearFalsePositiveBansOnce();
   clearBotBanIfExpired();
   if(isBotBanned()){
     const reason = (function(){ try{ return localStorage.getItem(BOT_BAN_REASON_KEY)||'automation'; }catch(e){ return 'automation'; }})();
@@ -367,12 +379,12 @@ function enforceBotBanOnBoot(){
   return false;
 }
 
-const MIN_FORM_MS = 3800;
+const MIN_FORM_MS = 2500;
 const MAX_ACCOUNTS_PER_DEVICE_24H = 2;
 const MAX_ACCOUNTS_PER_DEVICE_TOTAL = 3;
 const MAX_FAILED_ATTEMPTS = 4;
 const LOCKOUT_MS = 120000;
-const POW_DIFFICULTY = 4; // leading zero hex digits (16^4 = 65536 avg hashes)
+const POW_DIFFICULTY = 3; // leading zero hex digits (16^4 = 65536 avg hashes)
 let failCount = 0;
 let lockUntil = 0;
 let captchaToken = null;
@@ -708,11 +720,11 @@ function puzzleUp(){
 function resetPuzzleCaptcha(){ puzzleMakeImage(); }
 
 function analyzeHumanMotion(){
-  if(!PUZZLE.started||PUZZLE.moved<32||PUZZLE.moveEvents<10){
+  if(!PUZZLE.started||PUZZLE.moved<20||PUZZLE.moveEvents<6){
     return 'Drag the piece naturally with your finger or mouse.';
   }
   const elapsed=performance.now()-PUZZLE.started;
-  if(elapsed<320||elapsed>120000){
+  if(elapsed<200||elapsed>180000){
     return 'Please move the piece at a natural speed.';
   }
   // velocity consistency (bots often flat)
@@ -721,7 +733,7 @@ function analyzeHumanMotion(){
     const mean=vs.reduce((a,b)=>a+b,0)/vs.length;
     const variance=vs.reduce((a,v)=>a+(v-mean)*(v-mean),0)/vs.length;
     const std=Math.sqrt(variance);
-    if(mean>0.15 && std/mean < 0.06 && PUZZLE.dirChanges===0 && PUZZLE.path.length>18){
+    if(mean>0.2 && std/mean < 0.04 && PUZZLE.dirChanges===0 && PUZZLE.path.length>25){
       return 'Movement looks automated. Try a more natural drag.';
     }
     // unrealistically high constant speed
@@ -734,7 +746,7 @@ function analyzeHumanMotion(){
     const as=PUZZLE.accelSamples;
     const aMean=as.reduce((a,b)=>a+b,0)/as.length;
     const aVar=as.reduce((a,v)=>a+(v-aMean)*(v-aMean),0)/as.length;
-    if(aVar < 1 && PUZZLE.moved > 60 && PUZZLE.dirChanges===0){
+    if(aVar < 0.15 && PUZZLE.moved > 120 && PUZZLE.dirChanges===0){
       return 'Please drag with natural acceleration.';
     }
   }
@@ -746,14 +758,11 @@ function analyzeHumanMotion(){
     for(let i=1;i<PUZZLE.path.length;i++){
       pathLen+=Math.hypot(PUZZLE.path[i].x-PUZZLE.path[i-1].x,PUZZLE.path[i].y-PUZZLE.path[i-1].y);
     }
-    if(totalDist>25 && pathLen/totalDist < 1.015 && PUZZLE.dirChanges===0){
+    if(totalDist>40 && pathLen/totalDist < 1.008 && PUZZLE.dirChanges===0){
       return 'Please drag with a more natural path.';
     }
   }
-  // humans usually have at least a micro-pause or some jitter on longer drags
-  if(PUZZLE.moved > 90 && PUZZLE.pauseCount === 0 && PUZZLE.jitter < 0.3 && PUZZLE.dirChanges === 0){
-    return 'Movement appears too mechanical. Try again.';
-  }
+  // mechanical check disabled for false-positive safety on mobile
   return null;
 }
 
@@ -831,34 +840,27 @@ async function countDeviceAccounts(){
 }
 
 function detectAutomation(){
+  // ONLY hard, high-confidence bot signals — avoid false positives on real users
   const reasons = [];
   try{
     if(navigator.webdriver === true) reasons.push('webdriver');
   }catch(e){}
   try{
-    // Chrome headless / automation leftovers
-    if(window.chrome && !window.chrome.runtime) { /* may be ok */ }
-    if(navigator.plugins && navigator.plugins.length === 0 && navigator.languages && navigator.languages.length === 0){
-      reasons.push('empty_plugins_langs');
-    }
-  }catch(e){}
-  try{
-    // Selenium / Puppeteer common globals
-    const suspects = ['__webdriver_evaluate','__selenium_evaluate','__webdriver_script_function',
-      '__driver_evaluate','__fxdriver_evaluate','_Selenium_IDE_Recorder','callPhantom',
-      '_phantom','__nightmare','domAutomation','domAutomationController'];
+    const suspects = [
+      '__webdriver_evaluate','__selenium_evaluate','__webdriver_script_function',
+      '__driver_evaluate','__fxdriver_evaluate','_Selenium_IDE_Recorder',
+      'callPhantom','_phantom','__nightmare','domAutomation','domAutomationController',
+      '__playwright_evaluation_script__'
+    ];
     for(const k of suspects){
       if(window[k] || document[k]) { reasons.push('inject:'+k); break; }
     }
   }catch(e){}
+  // document.$cdc_ / $chrome_asyncScriptInfo — chrome driver leftovers
   try{
-    if(navigator.languages === undefined || (Array.isArray(navigator.languages) && navigator.languages.length === 0)){
-      reasons.push('no_languages');
+    for(const k of Object.keys(document)){
+      if(/^\$cdc_/.test(k) || k === '$chrome_asyncScriptInfo'){ reasons.push('cdc'); break; }
     }
-  }catch(e){}
-  try{
-    // outer vs inner dimension anomalies common in headless
-    if(window.outerWidth === 0 && window.outerHeight === 0) reasons.push('zero_outer');
   }catch(e){}
   return reasons;
 }
@@ -879,10 +881,9 @@ async function runAntiBotGates(username, isSignup){
     await logAntiBot('anti_bot', { username, reason: 'form_too_fast', ms: Date.now()-AUTH_OPENED_AT });
     return 'Please wait a moment and try again.';
   }
-  // low human interaction score (puzzle drag already adds score; keep soft)
-  if(interactionScore < 2 && (Date.now() - AUTH_OPENED_AT) > 8000){
-    await logAntiBot('anti_bot', { username, reason: 'low_interaction', score: interactionScore });
-    return 'Please interact with the page normally, then try again.';
+  // low interaction: soft reject only
+  if(interactionScore < 1.5 && (Date.now() - AUTH_OPENED_AT) > 8000){
+    return 'Please move the mouse or touch the screen once, then try again.';
   }
   // automation fingerprints
   const auto = detectAutomation();
