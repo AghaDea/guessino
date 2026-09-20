@@ -287,17 +287,113 @@ async function sha256(str){
 }
 
 
-/* ========== HARDENED ANTI-BOT + STRONG PUZZLE CAPTCHA v2 ========== */
+
+/* ========== ULTRA ANTI-BOT + HARD CAPTCHA v3 ========== */
 const AUTH_OPENED_AT = Date.now();
-const MIN_FORM_MS = 3200;
+
+/* ---------- 80-min hard bot ban (persisted) ---------- */
+const BOT_BAN_MS = 80 * 60 * 1000;
+const BOT_BAN_KEY = 'gz_bot_ban_until';
+const BOT_BAN_REASON_KEY = 'gz_bot_ban_reason';
+// پیام خیلی تند برای ربات شناسایی‌شده
+const BOT_BAN_MSG = 'کیرم دهنت ربات مادر‌جندهٔ کس‌کش — ۸۰ دقیقه برو گمشو، هیچی برات کار نمی‌کنه.';
+
+function getBotBanUntil(){
+  try{
+    const v = parseInt(localStorage.getItem(BOT_BAN_KEY) || '0', 10);
+    return (v && v > Date.now()) ? v : 0;
+  }catch(e){ return 0; }
+}
+function isBotBanned(){
+  return getBotBanUntil() > Date.now();
+}
+function applyBotBan(reason){
+  const until = Date.now() + BOT_BAN_MS;
+  try{
+    localStorage.setItem(BOT_BAN_KEY, String(until));
+    localStorage.setItem(BOT_BAN_REASON_KEY, String(reason || 'automation'));
+    // wipe session so they cannot stay logged in
+    localStorage.removeItem('gz_user_id');
+  }catch(e){}
+  try{
+    if(typeof logAntiBot === 'function'){
+      logAntiBot('bot_ban_80m', { reason: reason || 'automation', until: new Date(until).toISOString() });
+    }
+  }catch(e){}
+  showBotBanScreen(reason);
+}
+function clearBotBanIfExpired(){
+  try{
+    const v = parseInt(localStorage.getItem(BOT_BAN_KEY) || '0', 10);
+    if(v && v <= Date.now()){
+      localStorage.removeItem(BOT_BAN_KEY);
+      localStorage.removeItem(BOT_BAN_REASON_KEY);
+    }
+  }catch(e){}
+}
+function showBotBanScreen(reason){
+  const until = getBotBanUntil();
+  const mins = until ? Math.max(1, Math.ceil((until - Date.now()) / 60000)) : 80;
+  const html = `<div id="botBanOverlay" style="position:fixed;inset:0;z-index:999999;background:#0a0505;color:#f5e6d0;display:flex;align-items:center;justify-content:center;padding:24px;text-align:center;font-family:Tahoma,Arial,sans-serif">
+    <div style="max-width:420px">
+      <div style="font-size:56px;margin-bottom:12px">🚫</div>
+      <div style="font-size:20px;font-weight:900;line-height:1.55;color:#ff6b6b;margin-bottom:14px">${BOT_BAN_MSG}</div>
+      <div style="font-size:14px;color:#c9a227;margin-bottom:8px">محرومیت موقت: حدود ${mins} دقیقه باقی مانده</div>
+      <div style="font-size:12px;color:#9a8b72;line-height:1.6">ربات تشخیص داده شد. تا پایان محرومیت هیچ گزینه‌ای فعال نیست.<br>دلیل: ${String(reason||'automation').replace(/[<>&]/g,'')}</div>
+    </div>
+  </div>`;
+  try{
+    // disable everything
+    document.documentElement.style.pointerEvents = 'none';
+    const existing = document.getElementById('botBanOverlay');
+    if(existing) existing.remove();
+    document.body.insertAdjacentHTML('beforeend', html);
+    const ov = document.getElementById('botBanOverlay');
+    if(ov){ ov.style.pointerEvents = 'auto'; }
+    // block keys
+    window.addEventListener('keydown', function blockKeys(e){ e.preventDefault(); e.stopPropagation(); }, true);
+    window.addEventListener('contextmenu', function(e){ e.preventDefault(); }, true);
+  }catch(e){
+    try{ document.body.innerHTML = html; }catch(_){}
+  }
+}
+function enforceBotBanOnBoot(){
+  clearBotBanIfExpired();
+  if(isBotBanned()){
+    const reason = (function(){ try{ return localStorage.getItem(BOT_BAN_REASON_KEY)||'automation'; }catch(e){ return 'automation'; }})();
+    showBotBanScreen(reason);
+    return true;
+  }
+  return false;
+}
+
+const MIN_FORM_MS = 3800;
 const MAX_ACCOUNTS_PER_DEVICE_24H = 2;
 const MAX_ACCOUNTS_PER_DEVICE_TOTAL = 3;
-const MAX_FAILED_ATTEMPTS = 5;
-const LOCKOUT_MS = 90000;
+const MAX_FAILED_ATTEMPTS = 4;
+const LOCKOUT_MS = 120000;
+const POW_DIFFICULTY = 4; // leading zero hex digits (16^4 = 65536 avg hashes)
 let failCount = 0;
 let lockUntil = 0;
+let captchaToken = null;
+let captchaTokenExp = 0;
+let interactionScore = 0;
+let lastHumanEventAt = 0;
 
-// Stronger device signals
+/* --- Human interaction scoring (bots often skip real events) --- */
+(function trackHumanSignals(){
+  const bump = (w)=>{
+    interactionScore = Math.min(100, interactionScore + w);
+    lastHumanEventAt = Date.now();
+  };
+  ['pointermove','pointerdown','touchstart','keydown','scroll','mousemove'].forEach(ev=>{
+    window.addEventListener(ev, ()=> bump(ev==='pointermove'||ev==='mousemove'?0.15:1.2), {passive:true, once:false});
+  });
+  // visibility / focus
+  document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='visible') bump(2); });
+  window.addEventListener('focus', ()=> bump(1.5));
+})();
+
 function collectDeviceSignals(){
   const nav = navigator || {};
   const scr = window.screen || {};
@@ -305,20 +401,23 @@ function collectDeviceSignals(){
   let canvasHash = '', webglHash = '', audioHash = '';
   try{
     const c = document.createElement('canvas');
-    c.width = 280; c.height = 60;
+    c.width = 320; c.height = 70;
     const ctx = c.getContext('2d');
     if(ctx){
       ctx.textBaseline = 'top';
-      ctx.font = '16px "Segoe UI"';
+      ctx.font = '15px "Segoe UI", Arial';
       ctx.fillStyle = '#f60';
-      ctx.fillRect(0,0,280,60);
+      ctx.fillRect(0,0,320,70);
       ctx.fillStyle = '#069';
-      ctx.fillText('Guessino-FP-'+nav.language+'-'+Date.now().toString(36).slice(-4), 2, 2);
-      ctx.fillStyle = 'rgba(102,204,0,0.7)';
-      ctx.fillText('fp-v2', 4, 22);
+      ctx.fillText('GZ-FP3-'+nav.language+'-'+(performance.now()|0), 3, 3);
+      ctx.fillStyle = 'rgba(102,204,0,0.75)';
+      ctx.fillText('v3', 6, 24);
       ctx.strokeStyle = '#c45c26';
-      ctx.beginPath(); ctx.arc(140,30,18,0,Math.PI*2); ctx.stroke();
-      canvasHash = c.toDataURL().slice(-80);
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(160,35,22,0,Math.PI*1.7); ctx.stroke();
+      ctx.fillStyle = '#fff';
+      for(let i=0;i<12;i++){ ctx.fillRect(20+i*22, 50+Math.sin(i)*6, 3, 3); }
+      canvasHash = c.toDataURL().slice(-96);
     }
   }catch(e){}
   try{
@@ -328,7 +427,7 @@ function collectDeviceSignals(){
       const dbg = gl.getExtension('WEBGL_debug_renderer_info');
       const vendor = dbg ? gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL) : '';
       const renderer = dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : '';
-      webglHash = (vendor+'|'+renderer+'|'+gl.getParameter(gl.VERSION)).slice(0,120);
+      webglHash = (vendor+'|'+renderer+'|'+gl.getParameter(gl.VERSION)+'|'+gl.getParameter(gl.SHADING_LANGUAGE_VERSION)).slice(0,160);
     }
   }catch(e){}
   try{
@@ -338,17 +437,40 @@ function collectDeviceSignals(){
       const osc = ctx.createOscillator();
       const an = ctx.createAnalyser();
       osc.connect(an); an.connect(ctx.destination);
-      osc.start(0); const freq = an.frequencyBinCount;
-      osc.stop(); ctx.close();
-      audioHash = String(freq);
+      osc.frequency.value = 440;
+      osc.start(0);
+      const freq = an.frequencyBinCount;
+      osc.stop();
+      try{ ctx.close(); }catch(_){}
+      audioHash = String(freq)+':'+String(ctx.sampleRate||0);
     }
   }catch(e){}
+  let fontsProbe = '';
+  try{
+    const base = ['monospace','serif','sans-serif'];
+    const test = ['Arial','Courier New','Georgia','Times New Roman','Verdana','Comic Sans MS','Impact'];
+    const span = document.createElement('span');
+    span.style.cssText = 'position:absolute;left:-9999px;top:-9999px;font-size:72px;visibility:hidden;';
+    span.textContent = 'mmmmmmmmmmlli';
+    const root = document.body || document.documentElement;
+    if(root){
+      root.appendChild(span);
+      const widths = {};
+      base.forEach(f=>{ span.style.fontFamily=f; widths[f]=span.offsetWidth; });
+      fontsProbe = test.map(f=>{
+        span.style.fontFamily = '"'+f+'",monospace';
+        return (span.offsetWidth !== widths.monospace) ? '1' : '0';
+      }).join('');
+      root.removeChild(span);
+    }
+  }catch(e){ fontsProbe = ''; }
   return {
-    ua: (nav.userAgent || '').slice(0, 320),
+    ua: (nav.userAgent || '').slice(0, 340),
     platform: nav.platform || (nav.userAgentData && nav.userAgentData.platform) || '',
     language: nav.language || '',
     languages: (nav.languages || []).slice(0,6).join(','),
     screen: (scr.width||0)+'x'+(scr.height||0)+'@'+(window.devicePixelRatio||1),
+    avail: (scr.availWidth||0)+'x'+(scr.availHeight||0),
     colorDepth: scr.colorDepth || 0,
     timezone: tz,
     cores: nav.hardwareConcurrency || 0,
@@ -359,9 +481,12 @@ function collectDeviceSignals(){
     canvas: canvasHash,
     webgl: webglHash,
     audio: audioHash,
+    fonts: fontsProbe,
     plugins: (nav.plugins ? nav.plugins.length : 0),
     cookie: navigator.cookieEnabled ? 1 : 0,
-    doNotTrack: nav.doNotTrack || ''
+    doNotTrack: String(nav.doNotTrack || ''),
+    pdf: (nav.pdfViewerEnabled === true) ? 1 : 0,
+    hw: (nav.userAgentData && nav.userAgentData.mobile) ? 'm' : 'd'
   };
 }
 
@@ -370,19 +495,19 @@ async function hashFingerprint(str){
     const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
     return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
   }catch(e){
-    let h = 0;
-    for(let i=0;i<str.length;i++){ h = ((h<<5)-h)+str.charCodeAt(i); h|=0; }
-    return 'fb'+Math.abs(h).toString(16)+str.length.toString(16);
+    let h = 2166136261;
+    for(let i=0;i<str.length;i++){ h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
+    return 'fb'+ (h>>>0).toString(16) + str.length.toString(16);
   }
 }
 
 async function buildDeviceId(){
   const sig = collectDeviceSignals();
   const core = [
-    sig.platform, sig.language, sig.screen, sig.timezone,
+    sig.platform, sig.language, sig.screen, sig.avail, sig.timezone,
     String(sig.cores), String(sig.memory), String(sig.touch),
     String(sig.maxTouch), sig.vendor, sig.canvas, sig.webgl, sig.audio,
-    String(sig.colorDepth), String(sig.plugins)
+    String(sig.colorDepth), String(sig.plugins), sig.fonts, sig.hw
   ].join('|');
   const fp = await hashFingerprint(core);
   let seed = null;
@@ -391,7 +516,7 @@ async function buildDeviceId(){
     seed = (crypto.randomUUID ? crypto.randomUUID() : ('s'+Math.random().toString(36).slice(2)+Date.now()));
     try{ localStorage.setItem('gz_device_seed', seed); }catch(e){}
   }
-  const combined = await hashFingerprint(fp + '::' + seed + '::' + (sig.ua||'').slice(0,40));
+  const combined = await hashFingerprint(fp + '::' + seed + '::' + (sig.ua||'').slice(0,48));
   try{ localStorage.setItem('gz_device_id', combined); }catch(e){}
   return { id: combined, signals: sig, coreFp: fp };
 }
@@ -415,8 +540,28 @@ function getDeviceId(){
   return 'unknown';
 }
 
-/* ---------- Strong multi-layer puzzle CAPTCHA ---------- */
-let PUZZLE={x:0,y:0,targetX:0,targetY:0,size:42,drag:false,offX:0,offY:0,solved:false,started:0,moved:0,moveEvents:0,lastX:0,lastY:0,dirChanges:0,lastDir:0,path:[],velocitySamples:[],pointerType:''};
+/* ---------- Proof of Work (cheap for humans, costly at bot scale) ---------- */
+async function solvePow(challenge, difficulty){
+  const prefix = '0'.repeat(difficulty);
+  let nonce = 0;
+  const start = performance.now();
+  // Cap work time so UX stays acceptable (~0.5–2s on normal devices)
+  while(performance.now() - start < 3500){
+    const h = await hashFingerprint(challenge + ':' + nonce);
+    if(h.startsWith(prefix)) return { nonce, hash: h, ms: Math.round(performance.now()-start) };
+    nonce++;
+    if(nonce % 64 === 0) await new Promise(r=>setTimeout(r,0)); // yield to UI
+  }
+  return null; // failed within time
+}
+
+/* ---------- Ultra puzzle CAPTCHA with motion biometrics ---------- */
+let PUZZLE={
+  x:0,y:0,targetX:0,targetY:0,size:42,drag:false,offX:0,offY:0,solved:false,
+  started:0,moved:0,moveEvents:0,lastX:0,lastY:0,dirChanges:0,lastDir:0,
+  path:[],velocitySamples:[],accelSamples:[],pauseCount:0,lastMoveAt:0,
+  pointerType:'',pressureSamples:[],jitter:0
+};
 
 function puzzleRand(a,b){return Math.floor(Math.random()*(b-a+1))+a}
 function puzzleStatus(t,c=''){const e=$('puzzleStatus');if(e){e.textContent=t||'';e.className='puzzle-status'+(c?' '+c:'')}}
@@ -424,32 +569,49 @@ function puzzleStatus(t,c=''){const e=$('puzzleStatus');if(e){e.textContent=t||'
 function puzzleMakeImage(){
   const b=$('puzzleBoard'),c=$('puzzleCanvas'),p=$('puzzlePiece'),t=$('puzzleTarget');
   if(!b||!c||!p||!t)return;
-  const w=Math.max(220,b.clientWidth),h=118,s=puzzleRand(40,50);
+  const w=Math.max(220,b.clientWidth),h=118,s=puzzleRand(40,52);
   PUZZLE.size=s;c.width=w*2;c.height=h*2;
   const x=c.getContext('2d');x.setTransform(2,0,0,2,0,0);
-  const palettes=[['#172554','#0f766e','#7c3aed'],['#3f1d2e','#164e63','#854d0e'],['#172033','#3f6212','#7e22ce'],['#1e293b','#075985','#9f1239'],['#451a03','#7c2d12','#b45309']];
-  const q=palettes[Math.floor(Math.random()*palettes.length)],g=x.createLinearGradient(0,0,w,h);
-  g.addColorStop(0,q[0]);g.addColorStop(.5,q[1]);g.addColorStop(1,q[2]);
+  const palettes=[
+    ['#172554','#0f766e','#7c3aed'],['#3f1d2e','#164e63','#854d0e'],
+    ['#172033','#3f6212','#7e22ce'],['#1e293b','#075985','#9f1239'],
+    ['#451a03','#7c2d12','#b45309'],['#0c4a6e','#155e75','#6d28d9']
+  ];
+  const q=palettes[Math.floor(Math.random()*palettes.length)];
+  const g=x.createLinearGradient(0,0,w,h);
+  g.addColorStop(0,q[0]);g.addColorStop(.45,q[1]);g.addColorStop(1,q[2]);
   x.fillStyle=g;x.fillRect(0,0,w,h);
-  for(let i=0;i<55;i++){
-    x.fillStyle='rgba(255,255,255,'+(Math.random()*.09)+')';
-    x.beginPath();x.arc(Math.random()*w,Math.random()*h,2+Math.random()*18,0,Math.PI*2);x.fill();
+  // heavy visual noise (harder for simple CV bots)
+  for(let i=0;i<70;i++){
+    x.fillStyle='rgba(255,255,255,'+(Math.random()*.1)+')';
+    x.beginPath();x.arc(Math.random()*w,Math.random()*h,1+Math.random()*20,0,Math.PI*2);x.fill();
   }
-  // noise lines
-  for(let i=0;i<8;i++){
-    x.strokeStyle='rgba(255,255,255,'+(0.04+Math.random()*0.06)+')';
-    x.lineWidth=1+Math.random()*2;
-    x.beginPath();x.moveTo(Math.random()*w,Math.random()*h);x.lineTo(Math.random()*w,Math.random()*h);x.stroke();
+  for(let i=0;i<14;i++){
+    x.strokeStyle='rgba(0,0,0,'+(0.06+Math.random()*0.1)+')';
+    x.lineWidth=1+Math.random()*2.5;
+    x.beginPath();
+    x.moveTo(Math.random()*w,Math.random()*h);
+    x.bezierCurveTo(Math.random()*w,Math.random()*h,Math.random()*w,Math.random()*h,Math.random()*w,Math.random()*h);
+    x.stroke();
+  }
+  // random glyph noise
+  x.fillStyle='rgba(255,255,255,0.12)';
+  x.font='11px monospace';
+  for(let i=0;i<18;i++){
+    x.fillText(String.fromCharCode(0x30A0+Math.floor(Math.random()*90)), Math.random()*w, Math.random()*h);
   }
   const minX=8,maxX=Math.max(8,w-s-8),minY=8,maxY=Math.max(8,h-s-8);
   PUZZLE.targetX=puzzleRand(minX,maxX);PUZZLE.targetY=puzzleRand(minY,maxY);
   let px=puzzleRand(minX,maxX),py=puzzleRand(minY,maxY);
-  for(let i=0;i<12&&Math.hypot(px-PUZZLE.targetX,py-PUZZLE.targetY)<75;i++){
+  for(let i=0;i<14&&Math.hypot(px-PUZZLE.targetX,py-PUZZLE.targetY)<80;i++){
     px=puzzleRand(minX,maxX);py=puzzleRand(minY,maxY);
   }
   PUZZLE.x=px;PUZZLE.y=py;PUZZLE.solved=false;PUZZLE.drag=false;
   PUZZLE.started=0;PUZZLE.moved=0;PUZZLE.moveEvents=0;PUZZLE.dirChanges=0;PUZZLE.lastDir=0;
-  PUZZLE.lastX=px;PUZZLE.lastY=py;PUZZLE.path=[];PUZZLE.velocitySamples=[];PUZZLE.pointerType='';
+  PUZZLE.lastX=px;PUZZLE.lastY=py;PUZZLE.path=[];PUZZLE.velocitySamples=[];
+  PUZZLE.accelSamples=[];PUZZLE.pauseCount=0;PUZZLE.lastMoveAt=0;
+  PUZZLE.pointerType='';PUZZLE.pressureSamples=[];PUZZLE.jitter=0;
+  captchaToken=null;captchaTokenExp=0;
   t.style.left=PUZZLE.targetX+'px';t.style.top=PUZZLE.targetY+'px';
   t.style.width=s+'px';t.style.height=s+'px';
   const o=document.createElement('canvas');o.width=s;o.height=s;
@@ -477,10 +639,13 @@ function puzzleDown(e){
   PUZZLE.moved=0;PUZZLE.moveEvents=0;PUZZLE.dirChanges=0;PUZZLE.lastDir=0;
   PUZZLE.lastX=PUZZLE.x;PUZZLE.lastY=PUZZLE.y;
   PUZZLE.path=[{x:PUZZLE.x,y:PUZZLE.y,t:PUZZLE.started}];
-  PUZZLE.velocitySamples=[];
+  PUZZLE.velocitySamples=[];PUZZLE.accelSamples=[];PUZZLE.pauseCount=0;
+  PUZZLE.lastMoveAt=PUZZLE.started;PUZZLE.jitter=0;
   PUZZLE.pointerType = e.pointerType || 'unknown';
+  if(typeof e.pressure === 'number') PUZZLE.pressureSamples.push(e.pressure);
   p.classList.add('dragging');
   try{p.setPointerCapture(e.pointerId)}catch(_){}
+  interactionScore = Math.min(100, interactionScore + 3);
 }
 
 function puzzleMove(e){
@@ -493,7 +658,12 @@ function puzzleMove(e){
   const dist=Math.hypot(nx-PUZZLE.x,ny-PUZZLE.y);
   PUZZLE.moved+=dist;
   PUZZLE.moveEvents++;
-  if(Math.abs(dx)>0.35){
+  // micro-pause detection (humans pause; pure bots rarely)
+  if(PUZZLE.lastMoveAt && (now - PUZZLE.lastMoveAt) > 45 && (now - PUZZLE.lastMoveAt) < 400){
+    PUZZLE.pauseCount++;
+  }
+  PUZZLE.lastMoveAt = now;
+  if(Math.abs(dx)>0.3){
     const dir=dx>0?1:-1;
     if(PUZZLE.lastDir&&dir!==PUZZLE.lastDir)PUZZLE.dirChanges++;
     PUZZLE.lastDir=dir;
@@ -503,10 +673,26 @@ function puzzleMove(e){
     const dt=Math.max(1,now-last.t);
     const v=dist/(dt/1000);
     PUZZLE.velocitySamples.push(v);
-    if(PUZZLE.velocitySamples.length>40)PUZZLE.velocitySamples.shift();
+    if(PUZZLE.velocitySamples.length>50)PUZZLE.velocitySamples.shift();
+    if(PUZZLE.velocitySamples.length>=2){
+      const prev=PUZZLE.velocitySamples[PUZZLE.velocitySamples.length-2];
+      PUZZLE.accelSamples.push(v-prev);
+      if(PUZZLE.accelSamples.length>40)PUZZLE.accelSamples.shift();
+    }
+  }
+  // jitter (human hand tremor / imperfect tracking)
+  if(PUZZLE.path.length>=2){
+    const prev=PUZZLE.path[PUZZLE.path.length-1];
+    const expectedAngle = Math.atan2(ny-prev.y, nx-prev.x);
+    // accumulate small lateral noise
+    PUZZLE.jitter += Math.abs(dy)*0.01 + Math.abs(dx)*0.005;
   }
   PUZZLE.path.push({x:nx,y:ny,t:now});
-  if(PUZZLE.path.length>80)PUZZLE.path.shift();
+  if(PUZZLE.path.length>100)PUZZLE.path.shift();
+  if(typeof e.pressure === 'number') {
+    PUZZLE.pressureSamples.push(e.pressure);
+    if(PUZZLE.pressureSamples.length>30) PUZZLE.pressureSamples.shift();
+  }
   PUZZLE.lastX=nx;PUZZLE.lastY=ny;
   puzzleSetPos(nx,ny);
 }
@@ -522,52 +708,82 @@ function puzzleUp(){
 function resetPuzzleCaptcha(){ puzzleMakeImage(); }
 
 function analyzeHumanMotion(){
-  // Returns null if OK, or error string
-  if(!PUZZLE.started||PUZZLE.moved<28||PUZZLE.moveEvents<8){
+  if(!PUZZLE.started||PUZZLE.moved<32||PUZZLE.moveEvents<10){
     return 'Drag the piece naturally with your finger or mouse.';
   }
   const elapsed=performance.now()-PUZZLE.started;
-  if(elapsed<280||elapsed>90000){
+  if(elapsed<320||elapsed>120000){
     return 'Please move the piece at a natural speed.';
   }
-  // Too perfectly linear / constant velocity = bot
-  if(PUZZLE.velocitySamples.length>=6){
+  // velocity consistency (bots often flat)
+  if(PUZZLE.velocitySamples.length>=8){
     const vs=PUZZLE.velocitySamples;
     const mean=vs.reduce((a,b)=>a+b,0)/vs.length;
     const variance=vs.reduce((a,v)=>a+(v-mean)*(v-mean),0)/vs.length;
     const std=Math.sqrt(variance);
-    // human has variance; pure script often near-zero or extreme
-    if(mean>0.1 && std/mean < 0.08 && PUZZLE.dirChanges===0 && PUZZLE.path.length>15){
-      return 'Movement looks automated. Try again more naturally.';
+    if(mean>0.15 && std/mean < 0.06 && PUZZLE.dirChanges===0 && PUZZLE.path.length>18){
+      return 'Movement looks automated. Try a more natural drag.';
+    }
+    // unrealistically high constant speed
+    if(mean > 4500 && std < 200){
+      return 'Too fast / unnatural. Slow down a bit.';
     }
   }
-  // Path must not be a perfect straight line
-  if(PUZZLE.path.length>=10){
+  // acceleration variance
+  if(PUZZLE.accelSamples.length>=6){
+    const as=PUZZLE.accelSamples;
+    const aMean=as.reduce((a,b)=>a+b,0)/as.length;
+    const aVar=as.reduce((a,v)=>a+(v-aMean)*(v-aMean),0)/as.length;
+    if(aVar < 1 && PUZZLE.moved > 60 && PUZZLE.dirChanges===0){
+      return 'Please drag with natural acceleration.';
+    }
+  }
+  // path curvature
+  if(PUZZLE.path.length>=12){
     const first=PUZZLE.path[0], last=PUZZLE.path[PUZZLE.path.length-1];
     const totalDist=Math.hypot(last.x-first.x,last.y-first.y);
     let pathLen=0;
     for(let i=1;i<PUZZLE.path.length;i++){
       pathLen+=Math.hypot(PUZZLE.path[i].x-PUZZLE.path[i-1].x,PUZZLE.path[i].y-PUZZLE.path[i-1].y);
     }
-    if(totalDist>20 && pathLen/totalDist < 1.02 && PUZZLE.dirChanges===0){
+    if(totalDist>25 && pathLen/totalDist < 1.015 && PUZZLE.dirChanges===0){
       return 'Please drag with a more natural path.';
     }
+  }
+  // humans usually have at least a micro-pause or some jitter on longer drags
+  if(PUZZLE.moved > 90 && PUZZLE.pauseCount === 0 && PUZZLE.jitter < 0.3 && PUZZLE.dirChanges === 0){
+    return 'Movement appears too mechanical. Try again.';
   }
   return null;
 }
 
-function checkPuzzleCaptcha(){
-  if(PUZZLE.solved)return null;
+async function mintCaptchaToken(){
+  // Bind solution to device + short time window
+  const payload = [
+    DEVICE_ID || 'x',
+    String(PUZZLE.targetX|0), String(PUZZLE.targetY|0),
+    String(Math.round(PUZZLE.moved)), String(PUZZLE.moveEvents),
+    String(Date.now())
+  ].join('|');
+  const tok = await hashFingerprint(payload + '|gz-captcha-v3');
+  captchaToken = tok.slice(0,32);
+  captchaTokenExp = Date.now() + 90000; // 90s
+  return captchaToken;
+}
+
+async function checkPuzzleCaptcha(){
+  if(PUZZLE.solved && captchaToken && Date.now() < captchaTokenExp) return null;
   const motionErr=analyzeHumanMotion();
   if(motionErr){
     puzzleStatus(motionErr,'bad');
     return motionErr;
   }
   const dx=PUZZLE.x-PUZZLE.targetX, dy=PUZZLE.y-PUZZLE.targetY;
-  if(Math.hypot(dx,dy)<=8){
+  if(Math.hypot(dx,dy)<=7.5){
     PUZZLE.solved=true;
     puzzleSetPos(PUZZLE.targetX,PUZZLE.targetY);
     puzzleStatus('Verified ✓','ok');
+    await mintCaptchaToken();
     return null;
   }
   puzzleStatus('Wrong position — try again.','bad');
@@ -584,7 +800,11 @@ async function logAntiBot(action, details){
       action: action || 'anti_bot',
       target_username: details && details.username || null,
       target_device_id: DEVICE_ID || null,
-      details: Object.assign({ source: 'signup', ua: (navigator.userAgent||'').slice(0,120) }, details || {})
+      details: Object.assign({
+        source: 'auth_v3',
+        ua: (navigator.userAgent||'').slice(0,140),
+        score: interactionScore
+      }, details || {})
     });
   }catch(e){ console.warn('anti_bot log', e); }
 }
@@ -610,46 +830,83 @@ async function countDeviceAccounts(){
   }
 }
 
+function detectAutomation(){
+  const reasons = [];
+  try{
+    if(navigator.webdriver === true) reasons.push('webdriver');
+  }catch(e){}
+  try{
+    // Chrome headless / automation leftovers
+    if(window.chrome && !window.chrome.runtime) { /* may be ok */ }
+    if(navigator.plugins && navigator.plugins.length === 0 && navigator.languages && navigator.languages.length === 0){
+      reasons.push('empty_plugins_langs');
+    }
+  }catch(e){}
+  try{
+    // Selenium / Puppeteer common globals
+    const suspects = ['__webdriver_evaluate','__selenium_evaluate','__webdriver_script_function',
+      '__driver_evaluate','__fxdriver_evaluate','_Selenium_IDE_Recorder','callPhantom',
+      '_phantom','__nightmare','domAutomation','domAutomationController'];
+    for(const k of suspects){
+      if(window[k] || document[k]) { reasons.push('inject:'+k); break; }
+    }
+  }catch(e){}
+  try{
+    if(navigator.languages === undefined || (Array.isArray(navigator.languages) && navigator.languages.length === 0)){
+      reasons.push('no_languages');
+    }
+  }catch(e){}
+  try{
+    // outer vs inner dimension anomalies common in headless
+    if(window.outerWidth === 0 && window.outerHeight === 0) reasons.push('zero_outer');
+  }catch(e){}
+  return reasons;
+}
+
 async function runAntiBotGates(username, isSignup){
-  // lockout after repeated fails
   if(Date.now() < lockUntil){
     return 'Too many attempts. Please wait a moment.';
   }
-  // 0) honeypot
+  // honeypot
   const hp = $('authWebsite');
   if(hp && hp.value){
     await logAntiBot('anti_bot', { username, reason: 'honeypot_filled' });
-    failCount++;
-    return 'Please try again.';
+    applyBotBan('honeypot');
+    return BOT_BAN_MSG;
   }
-  // 1) too fast
+  // form too fast
   if(Date.now() - AUTH_OPENED_AT < MIN_FORM_MS){
     await logAntiBot('anti_bot', { username, reason: 'form_too_fast', ms: Date.now()-AUTH_OPENED_AT });
     return 'Please wait a moment and try again.';
   }
-  // 2) no real interaction signals (headless often lacks)
-  try{
-    if(typeof navigator.webdriver !== 'undefined' && navigator.webdriver){
-      await logAntiBot('anti_bot', { username, reason: 'webdriver' });
-      return 'Automated access detected.';
-    }
-  }catch(e){}
-  // 3) device already banned
+  // low human interaction score (puzzle drag already adds score; keep soft)
+  if(interactionScore < 2 && (Date.now() - AUTH_OPENED_AT) > 8000){
+    await logAntiBot('anti_bot', { username, reason: 'low_interaction', score: interactionScore });
+    return 'Please interact with the page normally, then try again.';
+  }
+  // automation fingerprints
+  const auto = detectAutomation();
+  if(auto.length){
+    await logAntiBot('anti_bot', { username, reason: 'automation', signals: auto });
+    applyBotBan('automation:' + auto.join(','));
+    return BOT_BAN_MSG;
+  }
+  // captcha token validity
+  if(!captchaToken || Date.now() > captchaTokenExp){
+    return 'Please complete the puzzle verification again.';
+  }
+  // device ban
   try{
     const ban = await getActiveDeviceBan();
-    if(ban){
-      return 'This device is restricted.';
-    }
+    if(ban) return 'This device is restricted.';
   }catch(e){}
 
   if(isSignup){
     const counts = await countDeviceAccounts();
     if(counts.day >= MAX_ACCOUNTS_PER_DEVICE_24H || counts.total >= MAX_ACCOUNTS_PER_DEVICE_TOTAL){
       await logAntiBot('anti_bot_block_device', {
-        username,
-        reason: 'mass_signup',
-        accounts_24h: counts.day,
-        accounts_total: counts.total
+        username, reason: 'mass_signup',
+        accounts_24h: counts.day, accounts_total: counts.total
       });
       return 'Registration temporarily blocked on this device.';
     }
@@ -662,9 +919,9 @@ function recordFail(){
   if(failCount >= MAX_FAILED_ATTEMPTS){
     lockUntil = Date.now() + LOCKOUT_MS;
     failCount = 0;
+    resetPuzzleCaptcha();
   }
 }
-
 
 function escapeHtml(s){ return (s||'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function fmtDate(d){
@@ -800,13 +1057,26 @@ async function submitAuth(){
   const pErr = validatePassword(password);
   if(pErr){ errBox.textContent=pErr; errBox.classList.remove('hidden'); return; }
 
-  const vErr = checkPuzzleCaptcha();
+  const vErr = await checkPuzzleCaptcha();
   if(vErr){ errBox.textContent=vErr; errBox.classList.remove('hidden'); recordFail(); return; }
   if(!sb){ errBox.textContent='Database is not connected. Please check your internet connection.'; errBox.classList.remove('hidden'); return; }
 
   btn.disabled = true;
+  const oldLabel = btn.textContent;
   try{
-    const botMsg = await withTimeout(runAntiBotGates(username, authMode === 'signup'), 6000);
+    // Proof-of-Work layer
+    btn.textContent = 'Verifying…';
+    const challenge = (captchaToken||'') + '|' + (DEVICE_ID||'') + '|' + username + '|' + String(Date.now()>>10);
+    const pow = await solvePow(challenge, POW_DIFFICULTY);
+    if(!pow){
+      errBox.textContent = 'Security check timed out. Please try again.';
+      errBox.classList.remove('hidden');
+      resetPuzzleCaptcha();
+      recordFail();
+      return;
+    }
+
+    const botMsg = await withTimeout(runAntiBotGates(username, authMode === 'signup'), 7000);
     if(botMsg){
       errBox.textContent = botMsg;
       errBox.classList.remove('hidden');
@@ -815,6 +1085,7 @@ async function submitAuth(){
       return;
     }
 
+    btn.textContent = authMode === 'login' ? 'Logging in…' : 'Signing up…';
     const hash = await sha256(password);
 
     if(authMode === 'signup'){
@@ -848,7 +1119,7 @@ async function submitAuth(){
         return;
       }
 
-      await logAntiBot('signup', {username,user_id:newUser.id,note:'ok'});
+      await logAntiBot('signup', {username,user_id:newUser.id,note:'ok',pow_ms:pow.ms});
       await finishLogin(newUser);
     }else{
       const result = await withTimeout(
@@ -880,6 +1151,7 @@ async function submitAuth(){
     recordFail();
   }finally{
     btn.disabled=false;
+    btn.textContent = oldLabel || (authMode === 'login' ? 'Log In' : 'Sign Up');
   }
 }
 
@@ -890,6 +1162,7 @@ $('authSubmitBtn').onclick = ()=> submitAuth();
 $('banLogoutBtn').onclick = ()=>{ localStorage.removeItem('gz_user_id'); showAuth('login'); };
 
 async function boot(){
+  if(enforceBotBanOnBoot()) return;
   showLoading();
   let finished=false;
   const forceOpen=setTimeout(()=>{
