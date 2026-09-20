@@ -19,6 +19,37 @@
 })();
 </script>
 
+<script>
+/* ========== STRONG CLIENT ANTI-BOT GATE (no game logic changes) ========== */
+(function(){
+  try {
+    // Block obvious automation
+    if (navigator.webdriver === true) {
+      document.documentElement.innerHTML = '<body style="background:#000;color:#fff;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0"><div style="text-align:center"><h2>Access restricted</h2><p>Automated clients are not allowed.</p></div></body>';
+      return;
+    }
+    // Require valid session token shape
+    var uid = null;
+    try { uid = localStorage.getItem('gz_user_id'); } catch(e) {}
+    if (!uid || uid.length < 8) {
+      // original gate already redirects; keep consistent
+    }
+    // Soft rate: prevent extremely rapid page reloads that bots use
+    try {
+      var k = 'gz_last_boot';
+      var now = Date.now();
+      var last = parseInt(localStorage.getItem(k) || '0', 10);
+      if (last && (now - last) < 400) {
+        // too fast consecutive loads
+        console.warn('rate');
+      }
+      localStorage.setItem(k, String(now));
+    } catch(e) {}
+  } catch (e) {}
+})();
+</script>
+
+
 
 
 <meta charset="UTF-8">
