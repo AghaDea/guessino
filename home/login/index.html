@@ -160,15 +160,39 @@ button:disabled{opacity:.5;cursor:default;pointer-events:none;}
 .verify-wrap{margin:10px 0 3px;position:relative;z-index:1}
 .verify-wrap>label{display:block;font-size:11px;color:var(--gold);margin:0 0 5px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;font-family:"Cinzel",Georgia,serif}
 .puzzle-wrap{width:100%;user-select:none;-webkit-user-select:none;touch-action:none}
-.puzzle-board{position:relative;width:100%;height:118px;border-radius:10px;overflow:hidden;background:#1a140e;border:1px solid var(--border);box-shadow:inset 0 2px 10px rgba(0,0,0,.4);touch-action:none}
+.puzzle-board{position:relative;width:100%;height:148px;border-radius:12px;overflow:hidden;background:#120e0a;border:1px solid var(--border);box-shadow:inset 0 3px 14px rgba(0,0,0,.55),0 0 0 1px rgba(201,162,39,.1);touch-action:none}
 .puzzle-board canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
-.puzzle-target,.puzzle-piece{position:absolute;width:42px;height:42px;border-radius:7px;box-sizing:border-box;pointer-events:auto;clip-path:polygon(0 18%,18% 18%,18% 0,82% 0,82% 18%,100% 18%,100% 82%,82% 82%,82% 100%,18% 100%,18% 82%,0 82%)}
-.puzzle-target{border:2px dashed rgba(232,220,200,.7);background:rgba(201,162,39,.12);box-shadow:0 0 0 1px rgba(0,0,0,.22) inset}
-.puzzle-piece{z-index:2;border:2px solid var(--gold);box-shadow:0 5px 14px rgba(0,0,0,.5);background-repeat:no-repeat;transform:translate3d(0,0,0);will-change:left,top;cursor:grab;touch-action:none}
-.puzzle-piece.dragging{cursor:grabbing;filter:brightness(1.1);box-shadow:0 7px 18px rgba(0,0,0,.55)}
-.puzzle-hint{height:19px;line-height:19px;text-align:center;font-size:11px;color:var(--text-dim);overflow:hidden;white-space:nowrap;font-style:italic}
-.puzzle-status{height:15px;line-height:15px;text-align:center;font-size:11px;color:var(--text-dim);overflow:hidden}
-.puzzle-status.ok{color:var(--green)}
+.puzzle-target{position:absolute;border-radius:10px;box-sizing:border-box;pointer-events:none;
+  background-color:#1a140e;
+  background-image:
+    linear-gradient(45deg,#2a2218 25%,transparent 25%),
+    linear-gradient(-45deg,#2a2218 25%,transparent 25%),
+    linear-gradient(45deg,transparent 75%,#2a2218 75%),
+    linear-gradient(-45deg,transparent 75%,#2a2218 75%);
+  background-size:12px 12px;
+  background-position:0 0,0 6px,6px -6px,-6px 0;
+  border:2px solid rgba(201,162,39,.45);
+  box-shadow:inset 0 0 0 1px rgba(0,0,0,.4),0 0 14px rgba(201,162,39,.2);
+  animation:checkerGlow 2.4s ease-in-out infinite;
+}
+@keyframes checkerGlow{0%,100%{box-shadow:inset 0 0 0 1px rgba(0,0,0,.4),0 0 10px rgba(201,162,39,.15)}50%{box-shadow:inset 0 0 0 1px rgba(0,0,0,.4),0 0 20px rgba(201,162,39,.35)}}
+.puzzle-piece{position:absolute;z-index:2;border-radius:10px;box-sizing:border-box;pointer-events:auto;
+  background:linear-gradient(145deg,#e8c547 0%,#c9a227 40%,#8a6e12 100%);
+  border:2.5px solid #f0d878;
+  box-shadow:0 6px 18px rgba(0,0,0,.55),inset 0 1px 0 rgba(255,240,180,.45),0 0 12px rgba(201,162,39,.3);
+  transform:translate3d(0,0,0);will-change:left,top;cursor:grab;touch-action:none;
+  display:flex;align-items:center;justify-content:center;
+  font-family:"Cinzel",Georgia,serif;font-weight:900;color:#2a1c10;
+  text-shadow:0 1px 0 rgba(255,240,180,.5);user-select:none;
+  transition:filter .15s,box-shadow .15s,transform .12s;
+}
+.puzzle-piece::after{content:'★';font-size:22px;line-height:1;pointer-events:none}
+.puzzle-piece.dragging{cursor:grabbing;filter:brightness(1.12);box-shadow:0 10px 26px rgba(0,0,0,.6),0 0 18px rgba(201,162,39,.45);z-index:5;transform:scale(1.04)}
+.puzzle-piece.solved{border-color:#f5e6a0;box-shadow:0 0 0 2px rgba(201,162,39,.55),0 0 24px rgba(201,162,39,.55);animation:pieceSnap .38s ease-out;filter:brightness(1.1)}
+@keyframes pieceSnap{0%{transform:scale(1.12)}55%{transform:scale(.94)}100%{transform:scale(1)}}
+.puzzle-hint{height:20px;line-height:20px;text-align:center;font-size:11px;color:var(--text-dim);overflow:hidden;white-space:nowrap;font-style:italic;margin-top:4px}
+.puzzle-status{height:16px;line-height:16px;text-align:center;font-size:12px;color:var(--text-dim);overflow:hidden;font-weight:600;letter-spacing:.02em}
+.puzzle-status.ok{color:var(--green);text-shadow:0 0 10px rgba(107,143,94,.4)}
 .puzzle-status.bad{color:var(--red)}
 
 body{min-height:100vh;}
@@ -221,7 +245,18 @@ html[data-theme="light"] .btn-primary{
 }
 html[data-theme="light"] .btn-ghost{color:var(--accent);border-color:var(--border);}
 html[data-theme="light"] .switch-line a{color:var(--accent);}
-html[data-theme="light"] .puzzle-board{background:#e8dcc8;border-color:var(--border);}
+html[data-theme="light"] .puzzle-board{background:#e8dcc8;border-color:var(--border);box-shadow:inset 0 2px 10px rgba(60,40,20,.12);}
+html[data-theme="light"] .puzzle-target{
+  background-color:#d4c19a;
+  background-image:
+    linear-gradient(45deg,#b89a6e 25%,transparent 25%),
+    linear-gradient(-45deg,#b89a6e 25%,transparent 25%),
+    linear-gradient(45deg,transparent 75%,#b89a6e 75%),
+    linear-gradient(-45deg,transparent 75%,#b89a6e 75%);
+  background-size:12px 12px;background-position:0 0,0 6px,6px -6px,-6px 0;
+  border-color:rgba(138,110,18,.55);
+}
+html[data-theme="light"] .puzzle-piece{color:#2a1c10;border-color:#c9a227;}
 html[data-theme="light"] .loading-wrap{background:var(--bg);}
 html[data-theme="light"] .ban-card{background:var(--bg-elev);}
 html[data-theme="light"] .err-msg{background:rgba(139,26,26,.1);color:#8b1a1a;border-color:rgba(139,26,26,.3);}
@@ -248,8 +283,8 @@ html[data-theme="light"] .err-msg{background:rgba(139,26,26,.1);color:#8b1a1a;bo
         <input id="authWebsite" name="website" type="text" tabindex="-1" autocomplete="off">
       </div>
       <div class="verify-wrap">
-        <label>Slide the piece into the matching cutout</label>
-        <div class="puzzle-wrap" id="puzzleCaptcha"><div class="puzzle-board" id="puzzleBoard"><canvas id="puzzleCanvas"></canvas><div class="puzzle-target" id="puzzleTarget"></div><div class="puzzle-piece" id="puzzlePiece"></div></div><div class="puzzle-hint">Drag the piece with your finger</div><div class="puzzle-status" id="puzzleStatus"></div></div>
+        <label>Place the gold mark on the checkered spot</label>
+        <div class="puzzle-wrap" id="puzzleCaptcha"><div class="puzzle-board" id="puzzleBoard"><canvas id="puzzleCanvas"></canvas><div class="puzzle-target" id="puzzleTarget"></div><div class="puzzle-piece" id="puzzlePiece"></div></div><div class="puzzle-hint">Drag the ★ onto the checkered square</div><div class="puzzle-status" id="puzzleStatus"></div></div>
       </div>
       <button class="btn btn-primary" id="authSubmitBtn">Log In</button>
       <div class="switch-line" id="authSwitchLine">Don't have an account? <a href="#" id="authSwitchLink">Sign up</a></div>
@@ -569,7 +604,7 @@ async function solvePow(challenge, difficulty){
 
 /* ---------- Ultra puzzle CAPTCHA with motion biometrics ---------- */
 let PUZZLE={
-  x:0,y:0,targetX:0,targetY:0,size:42,drag:false,offX:0,offY:0,solved:false,
+  x:0,y:0,targetX:0,targetY:0,size:48,drag:false,offX:0,offY:0,solved:false,
   started:0,moved:0,moveEvents:0,lastX:0,lastY:0,dirChanges:0,lastDir:0,
   path:[],velocitySamples:[],accelSamples:[],pauseCount:0,lastMoveAt:0,
   pointerType:'',pressureSamples:[],jitter:0
@@ -581,41 +616,59 @@ function puzzleStatus(t,c=''){const e=$('puzzleStatus');if(e){e.textContent=t||'
 function puzzleMakeImage(){
   const b=$('puzzleBoard'),c=$('puzzleCanvas'),p=$('puzzlePiece'),t=$('puzzleTarget');
   if(!b||!c||!p||!t)return;
-  const w=Math.max(220,b.clientWidth),h=118,s=puzzleRand(40,52);
+  const w=Math.max(220,b.clientWidth),h=148,s=puzzleRand(46,56);
   PUZZLE.size=s;c.width=w*2;c.height=h*2;
   const x=c.getContext('2d');x.setTransform(2,0,0,2,0,0);
-  const palettes=[
-    ['#172554','#0f766e','#7c3aed'],['#3f1d2e','#164e63','#854d0e'],
-    ['#172033','#3f6212','#7e22ce'],['#1e293b','#075985','#9f1239'],
-    ['#451a03','#7c2d12','#b45309'],['#0c4a6e','#155e75','#6d28d9']
+
+  // Western night / desert background (piece is NOT cut from this image)
+  const themes=[
+    {sky:['#0c0a12','#1a1420','#2a1c14']},
+    {sky:['#0a0e14','#152028','#1e2a22']},
+    {sky:['#120a0a','#241410','#3a2218']},
+    {sky:['#0e0c10','#1c1824','#2a2030']}
   ];
-  const q=palettes[Math.floor(Math.random()*palettes.length)];
-  const g=x.createLinearGradient(0,0,w,h);
-  g.addColorStop(0,q[0]);g.addColorStop(.45,q[1]);g.addColorStop(1,q[2]);
+  const th=themes[Math.floor(Math.random()*themes.length)];
+  const g=x.createLinearGradient(0,0,0,h);
+  g.addColorStop(0,th.sky[0]);g.addColorStop(.55,th.sky[1]);g.addColorStop(1,th.sky[2]);
   x.fillStyle=g;x.fillRect(0,0,w,h);
-  // heavy visual noise (harder for simple CV bots)
-  for(let i=0;i<70;i++){
-    x.fillStyle='rgba(255,255,255,'+(Math.random()*.1)+')';
-    x.beginPath();x.arc(Math.random()*w,Math.random()*h,1+Math.random()*20,0,Math.PI*2);x.fill();
+
+  // mesa / mountain silhouette
+  x.fillStyle='rgba(0,0,0,.38)';
+  x.beginPath();x.moveTo(0,h*0.7);
+  for(let i=0;i<=9;i++){
+    x.lineTo((w/9)*i+(Math.random()*16-8), h*0.52+Math.sin(i*1.4)*20+Math.random()*14);
   }
-  for(let i=0;i<14;i++){
-    x.strokeStyle='rgba(0,0,0,'+(0.06+Math.random()*0.1)+')';
-    x.lineWidth=1+Math.random()*2.5;
+  x.lineTo(w,h);x.lineTo(0,h);x.closePath();x.fill();
+
+  // stars
+  for(let i=0;i<60;i++){
+    x.fillStyle='rgba(232,220,200,'+(0.2+Math.random()*0.55)+')';
+    x.beginPath();x.arc(Math.random()*w,Math.random()*h*0.55,0.4+Math.random()*1.5,0,Math.PI*2);x.fill();
+  }
+  // gold dust
+  for(let i=0;i<35;i++){
+    x.fillStyle='rgba(201,162,39,'+(0.05+Math.random()*0.1)+')';
+    x.beginPath();x.arc(Math.random()*w,Math.random()*h,1+Math.random()*3,0,Math.PI*2);x.fill();
+  }
+  // leather scratches (anti-CV noise)
+  for(let i=0;i<80;i++){
+    x.strokeStyle='rgba(0,0,0,'+(0.04+Math.random()*0.08)+')';
+    x.lineWidth=0.5+Math.random()*1.6;
     x.beginPath();
-    x.moveTo(Math.random()*w,Math.random()*h);
-    x.bezierCurveTo(Math.random()*w,Math.random()*h,Math.random()*w,Math.random()*h,Math.random()*w,Math.random()*h);
+    const ax=Math.random()*w,ay=Math.random()*h;
+    x.moveTo(ax,ay);
+    x.quadraticCurveTo(ax+(Math.random()*28-14),ay+(Math.random()*18-9),ax+(Math.random()*36-18),ay+(Math.random()*28-14));
     x.stroke();
   }
-  // random glyph noise
-  x.fillStyle='rgba(255,255,255,0.12)';
-  x.font='11px monospace';
-  for(let i=0;i<18;i++){
-    x.fillText(String.fromCharCode(0x30A0+Math.floor(Math.random()*90)), Math.random()*w, Math.random()*h);
-  }
-  const minX=8,maxX=Math.max(8,w-s-8),minY=8,maxY=Math.max(8,h-s-8);
+  // vignette
+  const vg=x.createRadialGradient(w/2,h/2,h*0.15,w/2,h/2,h*0.9);
+  vg.addColorStop(0,'rgba(0,0,0,0)');vg.addColorStop(1,'rgba(0,0,0,.3)');
+  x.fillStyle=vg;x.fillRect(0,0,w,h);
+
+  const minX=12,maxX=Math.max(12,w-s-12),minY=12,maxY=Math.max(12,h-s-12);
   PUZZLE.targetX=puzzleRand(minX,maxX);PUZZLE.targetY=puzzleRand(minY,maxY);
   let px=puzzleRand(minX,maxX),py=puzzleRand(minY,maxY);
-  for(let i=0;i<14&&Math.hypot(px-PUZZLE.targetX,py-PUZZLE.targetY)<80;i++){
+  for(let i=0;i<18&&Math.hypot(px-PUZZLE.targetX,py-PUZZLE.targetY)<100;i++){
     px=puzzleRand(minX,maxX);py=puzzleRand(minY,maxY);
   }
   PUZZLE.x=px;PUZZLE.y=py;PUZZLE.solved=false;PUZZLE.drag=false;
@@ -624,12 +677,16 @@ function puzzleMakeImage(){
   PUZZLE.accelSamples=[];PUZZLE.pauseCount=0;PUZZLE.lastMoveAt=0;
   PUZZLE.pointerType='';PUZZLE.pressureSamples=[];PUZZLE.jitter=0;
   captchaToken=null;captchaTokenExp=0;
+
+  // checkerboard hole only — no image fragment
   t.style.left=PUZZLE.targetX+'px';t.style.top=PUZZLE.targetY+'px';
   t.style.width=s+'px';t.style.height=s+'px';
-  const o=document.createElement('canvas');o.width=s;o.height=s;
-  o.getContext('2d').drawImage(c,PUZZLE.targetX*2,PUZZLE.targetY*2,s*2,s*2,0,0,s,s);
+
+  // gold mark piece (NOT cut from background)
+  p.classList.remove('solved','dragging');
+  p.style.backgroundImage='none';
   p.style.width=s+'px';p.style.height=s+'px';
-  p.style.backgroundImage='url('+o.toDataURL('image/png')+')';
+  p.style.fontSize=Math.round(s*0.42)+'px';
   p.style.top=py+'px';puzzleSetX(px);puzzleStatus('');
 }
 
@@ -788,9 +845,11 @@ async function checkPuzzleCaptcha(){
     return motionErr;
   }
   const dx=PUZZLE.x-PUZZLE.targetX, dy=PUZZLE.y-PUZZLE.targetY;
-  if(Math.hypot(dx,dy)<=7.5){
+  if(Math.hypot(dx,dy)<=9){
     PUZZLE.solved=true;
     puzzleSetPos(PUZZLE.targetX,PUZZLE.targetY);
+    const p=$('puzzlePiece');
+    if(p){ p.classList.add('solved'); p.classList.remove('dragging'); }
     puzzleStatus('Verified ✓','ok');
     await mintCaptchaToken();
     return null;
