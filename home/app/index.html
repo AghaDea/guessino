@@ -26,7 +26,7 @@
   var BOT_BAN_MS = 80 * 60 * 1000;
   var BOT_BAN_KEY = 'gz_bot_ban_until';
   var BOT_BAN_REASON_KEY = 'gz_bot_ban_reason';
-  var BOT_BAN_MSG = 'کیرم دهنت ربات مادر‌جندهٔ کس‌کش — ۸۰ دقیقه برو گمشو، هیچی برات کار نمی‌کنه.';
+  var BOT_BAN_MSG = 'کیرم تو کونت ربات مادر‌قحبهٔ جنده‌زاده — ۸۰ دقیقه برو گمشو، هیچ دکمه‌ای برات کار نمی‌کنه.';
 
   // One-time clear of previous over-aggressive bans
   try {
@@ -2291,10 +2291,10 @@ async function loadAuditLog(){
     kick_device: 'Kicked device',
     kick_all_devices: 'Kicked all other devices',
     announce: 'Published announcement',
-    anti_bot: 'Anti-bot block',
-    anti_bot_ban_device: 'Anti-bot: device banned',
-    anti_bot_delete_user: 'Anti-bot: account deleted',
-    signup: 'New signup'
+    anti_bot: 'مسدودسازی ضد ربات',
+    anti_bot_ban_device: 'ضد ربات: بن دستگاه + حذف اکانت',
+    anti_bot_delete_user: 'ضد ربات: حذف اکانت',
+    signup: 'ثبت‌نام جدید'
   };
   box.innerHTML = data.map(r=>{
     const act = labels[r.action] || r.action;
@@ -2433,11 +2433,136 @@ function askConfirm(title, msg){
 }
 
 /* ---------- BOOT ---------- */
+/* ---------- Post-CAPTCHA bot enforcement: device ban 80m + delete account + admin log ---------- */
+const GZ_BOT_BAN_MS = 80 * 60 * 1000;
+const GZ_BOT_BAN_MSG = 'کیرم تو کونت ربات مادر‌قحبهٔ جنده‌زاده — ۸۰ دقیقه برو گمشو، هیچ دکمه‌ای برات کار نمی‌کنه.';
+const GZ_BOT_DEVICE_REASON = 'کیرم دهنت ربات کس‌کش مادر‌جنده — بن خودکار دستگاه ۸۰ دقیقه';
+const GZ_BOT_AUDIT_NOTE = 'ربات گوهِ خور از کپچا رد شد؛ دستگاه ۸۰ دقیقه بن شد و اکانتش پاک گردید';
+
+function detectHardBotSignals(){
+  const reasons = [];
+  try{ if(navigator.webdriver === true) reasons.push('webdriver'); }catch(e){}
+  try{
+    const suspects = [
+      '__webdriver_evaluate','__selenium_evaluate','__webdriver_script_function',
+      '__driver_evaluate','__fxdriver_evaluate','_Selenium_IDE_Recorder',
+      'callPhantom','_phantom','__nightmare','domAutomation','domAutomationController',
+      '__playwright_evaluation_script__'
+    ];
+    for(let i=0;i<suspects.length;i++){
+      try{ if(window[suspects[i]] || document[suspects[i]]){ reasons.push('toolkit:'+suspects[i]); break; } }catch(e){}
+    }
+  }catch(e){}
+  try{
+    const keys = Object.keys(document);
+    for(let j=0;j<keys.length;j++){
+      if(/^\$cdc_/.test(keys[j]) || keys[j] === '$chrome_asyncScriptInfo'){ reasons.push('cdc'); break; }
+    }
+  }catch(e){}
+  return reasons;
+}
+
+function isLocalBotBanned(){
+  try{
+    const v = parseInt(localStorage.getItem('gz_bot_ban_until') || '0', 10);
+    return (v && v > Date.now()) ? v : 0;
+  }catch(e){ return 0; }
+}
+
+function showFullBotBanOverlay(reason){
+  const until = isLocalBotBanned();
+  const mins = until ? Math.max(1, Math.ceil((until - Date.now()) / 60000)) : 80;
+  try{
+    document.documentElement.style.pointerEvents = 'none';
+    document.documentElement.innerHTML = '<body style="margin:0;background:#0a0505;color:#f5e6d0;font-family:Tahoma,Arial,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;text-align:center;padding:24px"><div style="max-width:420px"><div style="font-size:56px;margin-bottom:12px">🚫</div><div style="font-size:20px;font-weight:900;line-height:1.55;color:#ff6b6b;margin-bottom:14px">'+GZ_BOT_BAN_MSG+'</div><div style="font-size:14px;color:#c9a227;margin-bottom:8px">محرومیت موقت: حدود '+mins+' دقیقه باقی مانده</div><div style="font-size:12px;color:#9a8b72;line-height:1.6">ربات تشخیص داده شد. تا پایان محرومیت هیچ گزینه‌ای فعال نیست.<br>دلیل: '+String(reason||'automation').replace(/[<>&]/g,'')+'</div></div></body>';
+  }catch(e){}
+}
+
+async function enforceBotServerPunishment(reason){
+  reason = String(reason || 'automation');
+  const untilMs = Date.now() + GZ_BOT_BAN_MS;
+  const untilIso = new Date(untilMs).toISOString();
+  let did = null;
+  try{ did = DEVICE_ID || localStorage.getItem('gz_device_id') || null; }catch(e){ did = DEVICE_ID || null; }
+  let uid = null;
+  let uname = null;
+  try{
+    if(CURRENT_USER && CURRENT_USER.id){ uid = CURRENT_USER.id; uname = CURRENT_USER.username || null; }
+    else { uid = localStorage.getItem('gz_user_id') || null; }
+  }catch(e){}
+
+  try{
+    localStorage.setItem('gz_bot_ban_until', String(untilMs));
+    localStorage.setItem('gz_bot_ban_reason', reason);
+    localStorage.removeItem('gz_user_id');
+  }catch(e){}
+
+  if(sb){
+    if(did){
+      try{
+        await sb.from('banned_devices').upsert({
+          device_id: did,
+          reason: GZ_BOT_DEVICE_REASON,
+          banned_until: untilIso,
+          banned_at: new Date().toISOString(),
+          banned_by: null,
+          note: GZ_BOT_AUDIT_NOTE
+        });
+      }catch(e){ console.warn('bot device ban', e); }
+    }
+    if(uid){
+      try{ await sb.from('devices').delete().eq('user_id', uid); }catch(e){}
+      try{ await sb.from('users').delete().eq('id', uid); }catch(e){
+        try{
+          await sb.from('users').update({
+            banned: true, ban_type: 'device', ban_reason: GZ_BOT_DEVICE_REASON,
+            ban_until: untilIso, banned_at: new Date().toISOString()
+          }).eq('id', uid);
+        }catch(e2){}
+      }
+    }
+    try{
+      await sb.from('audit_log').insert({
+        actor_id: null,
+        actor_username: 'SYSTEM',
+        action: 'anti_bot_ban_device',
+        target_user_id: uid || null,
+        target_username: uname,
+        target_device_id: did,
+        details: {
+          source: 'app_post_captcha',
+          reason: reason,
+          banned_until: untilIso,
+          account_deleted: !!uid,
+          note: GZ_BOT_AUDIT_NOTE,
+          device_reason: GZ_BOT_DEVICE_REASON
+        }
+      });
+    }catch(e){ console.warn('bot audit', e); }
+  }
+
+  CURRENT_USER = null;
+  showFullBotBanOverlay(GZ_BOT_DEVICE_REASON);
+}
+
 async function boot(){
   if(!sb){ $('loadingScreen').classList.add('hidden'); return; }
   showLoading();
   try{
     await initDevice();
+    try{
+      const localUntil = isLocalBotBanned();
+      if(localUntil){
+        const r = (function(){ try{ return localStorage.getItem('gz_bot_ban_reason')||'automation'; }catch(e){ return 'automation'; }})();
+        await enforceBotServerPunishment(r);
+        return;
+      }
+      const hard = detectHardBotSignals();
+      if(hard.length){
+        await enforceBotServerPunishment(hard.join(','));
+        return;
+      }
+    }catch(e){ console.warn('bot enforce boot', e); }
     const devBan = await getActiveDeviceBan();
     if(devBan){ showDeviceBanScreen(devBan); return; }
     const savedId = localStorage.getItem('gz_user_id');
@@ -2446,7 +2571,6 @@ async function boot(){
       if(!error && user){ await enterSession(user, { fromSaved: true }); return; }
       localStorage.removeItem('gz_user_id');
     }
-    // Not logged in → Login page
     gzGoLogin();
   }catch(e){
     console.error(e);
@@ -2569,6 +2693,22 @@ $('banLogoutBtn').onclick = ()=>{ localStorage.removeItem('gz_user_id'); gzGoLog
 async function enterSession(user, opts){
   opts = opts || {};
   if(!DEVICE_ID) await initDevice();
+
+  // Post-CAPTCHA bot: device ban 80m + delete account + admin log
+  try{
+    const localUntil = isLocalBotBanned();
+    if(localUntil){
+      CURRENT_USER = user;
+      await enforceBotServerPunishment((function(){ try{ return localStorage.getItem('gz_bot_ban_reason')||'automation'; }catch(e){ return 'automation'; }})());
+      return;
+    }
+    const hard = detectHardBotSignals();
+    if(hard.length){
+      CURRENT_USER = user;
+      await enforceBotServerPunishment(hard.join(','));
+      return;
+    }
+  }catch(e){ console.warn('bot enforce session', e); }
 
   if(user.banned && user.ban_until && new Date(user.ban_until) <= new Date()){
     const { data: updated } = await sb.from('users').update({
