@@ -1359,6 +1359,47 @@ html[data-theme="light"] .field label{color:var(--gold) !important;}
 .duel-mode-select{display:flex;gap:6px;flex-wrap:wrap;margin:10px 0;}
 .duel-mode-select button{flex:1;min-width:70px;padding:8px;border-radius:999px;border:1px solid var(--border);background:var(--bg);color:var(--text-dim);font-weight:700;font-size:12px;}
 .duel-mode-select button.active{background:var(--accent);color:#fff;border-color:var(--accent);}
+
+/* ---- Theme polish v3.3.2 + Duel ---- */
+.duel-banner{
+  background:linear-gradient(135deg,rgba(247,201,72,.16),rgba(29,155,240,.10));
+  border:1px solid rgba(247,201,72,.4);
+  box-shadow:0 4px 20px rgba(247,201,72,.08);
+}
+.duel-banner.show{animation:duelPulse 2s ease infinite;}
+@keyframes duelPulse{
+  0%,100%{box-shadow:0 0 0 0 rgba(247,201,72,.15);}
+  50%{box-shadow:0 0 0 6px rgba(247,201,72,0);}
+}
+.duel-locked-overlay .box{
+  background:var(--bg-elev);border:1px solid var(--border);
+  box-shadow:var(--shadow);
+}
+html[data-theme="light"] .duel-banner{
+  background:linear-gradient(135deg,rgba(201,162,39,.12),rgba(11,125,218,.08));
+  border-color:rgba(201,162,39,.35);
+  color:var(--text);
+}
+html[data-theme="light"] .duel-banner b{color:#a67c00;}
+html[data-theme="light"] .duel-locked-overlay{background:rgba(240,242,245,.72);}
+html[data-theme="light"] .duel-locked-overlay .box{background:#fff;color:var(--text);}
+html[data-theme="light"] .duel-mode-select button{background:#fff;color:var(--text-dim);}
+html[data-theme="light"] .duel-mode-select button.active{background:var(--accent);color:#fff;}
+html[data-theme="light"] #duelCreateModal .modal-box,
+html[data-theme="light"] #duelInviteModal .modal-box{background:#fff;}
+/* Light: fix remaining dark hardcodes */
+html[data-theme="light"] .keypad button{background:#fff !important;color:var(--text) !important;border-color:var(--border) !important;}
+html[data-theme="light"] .keypad button.key-set{background:var(--accent) !important;color:#fff !important;border-color:var(--accent) !important;}
+html[data-theme="light"] .guess-display{background:#fff !important;color:var(--accent) !important;border-color:var(--border) !important;}
+html[data-theme="light"] .guess-display.empty{color:var(--text-dim) !important;}
+html[data-theme="light"] .guess-history{background:#fff !important;border-color:var(--border) !important;}
+html[data-theme="light"] .admin-actions button{background:#fff !important;color:var(--text) !important;}
+html[data-theme="light"] .clan-action-menu{background:#fff;border-color:var(--border);}
+html[data-theme="light"] .clan-action-menu button{color:var(--text);}
+html[data-theme="light"] .notif-panel{box-shadow:0 12px 40px rgba(0,0,0,.12);}
+html[data-theme="light"] .modal-bg{background:rgba(15,23,42,.35);}
+html:not([data-theme="light"]) .duel-banner b{color:var(--gold);}
+html:not([data-theme="light"]) .modal-bg{background:rgba(0,0,0,.78);}
 </style>
 </head>
 <body>
@@ -3469,6 +3510,18 @@ async function openUserModal(u){
   $('modalGuesses').textContent = u.total_guesses;
   $('modalStreak').textContent = (u.best_streak||0) + ' (current ' + (u.current_streak||0) + ')';
   $('modalCrowns').textContent = `${u.crowns||0} 🏆 (${u.champion_points||0} pts)`;
+  try{
+    let dw = $('modalDuelWins');
+    if(!dw){
+      const row = document.createElement('div');
+      row.className = 'detail-row';
+      row.innerHTML = '<span>Duel wins</span><span id="modalDuelWins">0</span>';
+      const crownsRow = $('modalCrowns') && $('modalCrowns').closest('.detail-row');
+      if(crownsRow && crownsRow.parentNode) crownsRow.parentNode.insertBefore(row, crownsRow.nextSibling);
+      dw = $('modalDuelWins');
+    }
+    if(dw) dw.textContent = String(u.duel_wins||0) + ' ⚔️';
+  }catch(e){}
   $('modalLastOnline').textContent = fmtDate(u.last_online);
   $('modalLastWin').textContent = fmtDate(u.last_win);
   // Achievements: only unlocked for this user
@@ -7087,11 +7140,12 @@ async function loadUserTags(userId, container){
 /* ---------- INIT ---------- */
 
 /* ========== LIVE DUEL 1v1 (v3.3) ========== */
-let ACTIVE_DUEL = null; // { id, creator_id, opponent_id, mode, target, status, winner_id, locked, ... }
+let ACTIVE_DUEL = null;
 let DUEL_TARGET_USER = null;
 let _duelChannel = null;
 let _duelUiLocked = false;
 let _pendingDuelInviteRoomId = null;
+let _duelWatchTimer = null;
 
 function isDuelActive(){
   return !!(ACTIVE_DUEL && (ACTIVE_DUEL.status === 'active' || ACTIVE_DUEL.status === 'pending'));
@@ -7141,6 +7195,8 @@ function showDuelBanner(){
 function clearDuelLocal(keepOverlayMs){
   const was = ACTIVE_DUEL;
   ACTIVE_DUEL = null;
+  window.__duelEnteredId = null; window.__duelFinishedId = null; window.__duelCancelledId = null;
+  try{ if(_duelWatchTimer){ clearInterval(_duelWatchTimer); _duelWatchTimer=null; } }catch(e){}
   try{ if(_duelChannel){ sb.removeChannel(_duelChannel); } }catch(e){}
   _duelChannel = null;
   showDuelBanner();
@@ -7159,8 +7215,7 @@ async function openDuelCreateModal(u){
   if(!CURRENT_USER || !u) return;
   if(u.id === CURRENT_USER.id) return toast('Cannot duel yourself');
   // Viewer is always treated as online while using the app
-  const oppOk = u.last_online && (Date.now() - new Date(u.last_online).getTime()) < 10*60*1000;
-  if(!oppOk) return toast('Opponent must be online');
+  if(!isOnline(u.last_online)) return toast('Opponent must be online');
   if(isDuelActive()) return toast('You already have an active duel');
   DUEL_TARGET_USER = u;
   if($('duelTargetName')) $('duelTargetName').textContent = '@'+(u.username||'user');
@@ -7205,9 +7260,7 @@ async function sendDuelRequest(){
 
     const { data: opp } = await sb.from('users').select('id,username,last_online,banned').eq('id', DUEL_TARGET_USER.id).maybeSingle();
     if(!opp || opp.banned) { toast('User unavailable'); return; }
-    // soft online: 10 minutes window for request
-    const oppOnline = opp.last_online && (Date.now() - new Date(opp.last_online).getTime()) < 10*60*1000;
-    if(!oppOnline){ toast('Opponent is offline'); return; }
+    if(!isOnline(opp.last_online)){ toast('Opponent is offline'); return; }
 
     let room = null;
     // Prefer RPC if schema applied
@@ -7216,7 +7269,7 @@ async function sendDuelRequest(){
         p_creator_id: CURRENT_USER.id,
         p_opponent_id: DUEL_TARGET_USER.id,
         p_mode: mode,
-        p_online_minutes: 10
+        p_online_minutes: 5
       });
       if(error){
         console.warn('create_duel_v2', error);
@@ -7302,24 +7355,75 @@ function subscribeDuelRoom(roomId){
       })
       .subscribe();
     _duelChannel = ch;
-  }catch(e){ console.warn('duel rt', e); }
+    startDuelWatch();
+  }catch(e){ console.warn('duel rt', e); startDuelWatch(); }
+}
+
+
+function startDuelWatch(){
+  try{ if(_duelWatchTimer) clearInterval(_duelWatchTimer); }catch(e){}
+  const tick = async ()=>{
+    if(!ACTIVE_DUEL || !CURRENT_USER || !sb) return;
+    try{
+      await sb.from('users').update({ last_online: new Date().toISOString() }).eq('id', CURRENT_USER.id);
+      const { data: room } = await sb.from('duel_rooms').select('*').eq('id', ACTIVE_DUEL.id).maybeSingle();
+      if(!room){
+        clearDuelLocal(0);
+        toast('Duel room closed');
+        try{ startNewRound(); }catch(e){}
+        return;
+      }
+      const prevStatus = ACTIVE_DUEL.status;
+      // Any status change → handle (critical: pending→active without refresh)
+      if(room.status !== prevStatus || room.locked !== ACTIVE_DUEL.locked || room.winner_id !== ACTIVE_DUEL.winner_id){
+        await handleDuelRoomUpdate(room, 'POLL');
+        return;
+      }
+      if(room.status === 'finished' || room.status === 'cancelled') return;
+      // opponent offline > 40s → auto cancel for both
+      const otherId = room.creator_id === CURRENT_USER.id ? room.opponent_id : room.creator_id;
+      const { data: other } = await sb.from('users').select('last_online').eq('id', otherId).maybeSingle();
+      const otherAge = other && other.last_online ? (Date.now() - new Date(other.last_online).getTime()) : 999999;
+      if(otherAge > 40000){
+        await sb.from('duel_rooms').update({
+          status:'cancelled', locked:true, finished_at:new Date().toISOString(), updated_at:new Date().toISOString()
+        }).eq('id', room.id).in('status',['pending','active']);
+        // local close; other side will poll and close too
+        await handleDuelRoomUpdate(Object.assign({}, room, { status:'cancelled', locked:true }), 'POLL');
+      }
+    }catch(e){}
+  };
+  _duelWatchTimer = setInterval(tick, 2000);
+  // run once immediately
+  tick();
+  // also on tab focus
+  if(!window.__duelVisBound){
+    window.__duelVisBound = true;
+    document.addEventListener('visibilitychange', ()=>{
+      if(document.visibilityState === 'visible' && ACTIVE_DUEL) tick();
+    });
+  }
 }
 
 async function handleDuelRoomUpdate(row, eventType){
   if(!row) return;
   const prev = ACTIVE_DUEL;
+  const prevStatus = prev && prev.status;
   ACTIVE_DUEL = Object.assign({}, ACTIVE_DUEL||{}, row);
 
   if(row.status === 'active'){
-    // both enter game with shared target
     enterDuelGame(row);
   } else if(row.status === 'finished'){
+    if(window.__duelFinishedId === row.id) return;
+    window.__duelFinishedId = row.id;
     await onDuelFinished(row);
   } else if(row.status === 'cancelled'){
-    const wasPlaying = prev && (prev.status === 'active' || prev.status === 'pending');
+    if(window.__duelCancelledId === row.id) return;
+    window.__duelCancelledId = row.id;
+    const wasPlaying = prevStatus === 'active' || prevStatus === 'pending';
     clearDuelLocal(0);
     if(wasPlaying) toast('Duel cancelled');
-    if(prev && prev.status === 'active'){
+    if(prevStatus === 'active'){
       try{ startNewRound(); }catch(e){}
     }
   }
@@ -7328,8 +7432,14 @@ async function handleDuelRoomUpdate(row, eventType){
 
 function enterDuelGame(room){
   if(!room || !CURRENT_USER) return;
+  // avoid re-entering same active room repeatedly
+  if(ACTIVE_DUEL && ACTIVE_DUEL.id === room.id && ACTIVE_DUEL.status === 'active' && room.status === 'active' && window.__duelEnteredId === room.id){
+    ACTIVE_DUEL = Object.assign({}, ACTIVE_DUEL, room);
+    showDuelBanner();
+    return;
+  }
+  window.__duelEnteredId = room.id;
   ACTIVE_DUEL = room;
-  // force mode + target from room (no local random)
   gameMode = room.mode || 'normal';
   try{ localStorage.setItem('gz_game_mode', gameMode); }catch(e){}
   const wrap = $('modeTabs');
@@ -7367,19 +7477,39 @@ async function onDuelFinished(room){
     rl.textContent = iWon ? ('You Win! '+Number(room.target).toLocaleString('en-US')) : ('Opponent won · number was '+Number(room.target).toLocaleString('en-US'));
   }
   if(iWon){
-    // award normal win stats once
     try{
       const guesses = (room.creator_id === CURRENT_USER.id) ? (room.creator_guesses||currentGuessCount) : (room.opponent_guesses||currentGuessCount);
       await registerWin(guesses || currentGuessCount || 1, room.mode);
     }catch(e){}
-    toast('🏆 You won the duel!');
+    // refresh duel_wins (RPC may have already +1; fallback only if still same)
+    try{
+      const prev = Number(CURRENT_USER.duel_wins)||0;
+      let { data: u2 } = await sb.from('users').select('duel_wins,duel_losses').eq('id', CURRENT_USER.id).maybeSingle();
+      if(u2 && (Number(u2.duel_wins)||0) > prev){
+        CURRENT_USER.duel_wins = u2.duel_wins;
+      } else {
+        // client fallback award
+        const dw = prev + 1;
+        const { data: u3 } = await sb.from('users').update({ duel_wins: dw }).eq('id', CURRENT_USER.id).select('duel_wins').single();
+        CURRENT_USER.duel_wins = (u3 && u3.duel_wins) || dw;
+      }
+    }catch(e){}
+    toast('🏆 Duel win! ⚔️ '+(CURRENT_USER.duel_wins||1));
   } else {
-    // streak break for loser
     try{
       if(CURRENT_USER && (CURRENT_USER.current_streak||0) > 0){
         await sb.from('users').update({ current_streak: 0 }).eq('id', CURRENT_USER.id);
         CURRENT_USER.current_streak = 0;
         updateStreakPill();
+      }
+      const prev = Number(CURRENT_USER.duel_losses)||0;
+      let { data: u2 } = await sb.from('users').select('duel_losses').eq('id', CURRENT_USER.id).maybeSingle();
+      if(u2 && (Number(u2.duel_losses)||0) > prev){
+        CURRENT_USER.duel_losses = u2.duel_losses;
+      } else {
+        const dl = prev + 1;
+        await sb.from('users').update({ duel_losses: dl }).eq('id', CURRENT_USER.id);
+        CURRENT_USER.duel_losses = dl;
       }
     }catch(e){}
     toast('Duel lost — better luck next time');
@@ -7453,7 +7583,6 @@ async function claimDuelWinIfNeeded(guesses){
       const { data: upd, error: ue } = await sb.from('duel_rooms').update(patch)
         .eq('id', ACTIVE_DUEL.id).eq('status','active').eq('locked', false).select().single();
       if(ue || !upd){
-        // maybe opponent won first — fetch
         const { data: cur } = await sb.from('duel_rooms').select('*').eq('id', ACTIVE_DUEL.id).maybeSingle();
         if(cur && cur.status === 'finished'){
           await handleDuelRoomUpdate(cur, 'UPDATE');
@@ -7463,6 +7592,14 @@ async function claimDuelWinIfNeeded(guesses){
         setDuelUiLocked(false);
         return false;
       }
+      // fallback path: award duel_wins here (RPC path awards in SQL)
+      try{
+        const { data: me } = await sb.from('users').select('duel_wins').eq('id', CURRENT_USER.id).maybeSingle();
+        await sb.from('users').update({ duel_wins: (Number(me&&me.duel_wins)||0)+1 }).eq('id', CURRENT_USER.id);
+        const oid = ACTIVE_DUEL.creator_id === CURRENT_USER.id ? ACTIVE_DUEL.opponent_id : ACTIVE_DUEL.creator_id;
+        const { data: op } = await sb.from('users').select('duel_losses').eq('id', oid).maybeSingle();
+        if(oid) await sb.from('users').update({ duel_losses: (Number(op&&op.duel_losses)||0)+1 }).eq('id', oid);
+      }catch(e){}
       room = upd;
       winnerId = upd.winner_id;
     }
@@ -7510,6 +7647,15 @@ async function acceptDuelInvite(){
     try{
       await sb.from('notifications').update({ is_read: true })
         .eq('user_id', CURRENT_USER.id).eq('type','duel_invite');
+    }catch(e){}
+    // ping creator so they leave "waiting" state without refresh
+    try{
+      const creatorId = room.creator_id;
+      if(creatorId && creatorId !== CURRENT_USER.id){
+        await pushNotification(creatorId, 'duel_accepted', '⚔️ Duel accepted!',
+          '@'+CURRENT_USER.username+' accepted your duel',
+          { room_id: room.id, status: 'active', mode: room.mode });
+      }
     }catch(e){}
     subscribeDuelRoom(room.id);
     await handleDuelRoomUpdate(room, 'UPDATE');
@@ -7660,9 +7806,9 @@ const _origGoPageDuel = typeof goPage === 'function' ? goPage : null;
       }
     }
     const self = CURRENT_USER && u && u.id === CURRENT_USER.id;
-    const oppOnline = !self && u && u.last_online && (Date.now() - new Date(u.last_online).getTime()) < 10*60*1000;
+    const oppOnline = !self && u && isOnline(u.last_online);
     if(self || !oppOnline){
-      box.innerHTML = self ? '' : '<div style="font-size:11px;color:var(--text-dim);text-align:center;margin-top:6px;">Duel available when opponent is online</div>';
+      box.innerHTML = self ? '' : '<div style="font-size:11px;color:var(--text-dim);text-align:center;margin-top:6px;">⚔️ Duel only when opponent is online</div>';
       return;
     }
     box.innerHTML = `<button type="button" class="btn btn-primary" id="challengeDuelBtn" style="margin-top:4px;">⚔️ Challenge to Duel</button>
@@ -7702,17 +7848,40 @@ const _origGoPageDuel = typeof goPage === 'function' ? goPage : null;
     if(!sb || !CURRENT_USER) return;
     try{
       const ch = sb.channel('duel-invite-'+CURRENT_USER.id)
-        .on('postgres_changes', { event:'INSERT', schema:'public', table:'notifications', filter:'user_id=eq.'+CURRENT_USER.id }, payload=>{
+        .on('postgres_changes', { event:'INSERT', schema:'public', table:'notifications', filter:'user_id=eq.'+CURRENT_USER.id }, async payload=>{
           const n = payload.new;
-          if(!n || n.type !== 'duel_invite') return;
+          if(!n) return;
           let data = n.data || {};
           if(typeof data === 'string'){ try{ data = JSON.parse(data); }catch(e){ data={}; } }
-          const roomId = data.room_id;
-          if(!roomId) return;
-          // also subscribe so if creator cancels we know
-          subscribeDuelRoom(roomId);
-          showDuelInviteModal(roomId, data.from_username || 'Someone', data.mode || 'normal');
           try{ refreshNotifBadge(); }catch(e){}
+          if(n.type === 'duel_invite'){
+            const roomId = data.room_id;
+            if(!roomId) return;
+            subscribeDuelRoom(roomId);
+            showDuelInviteModal(roomId, data.from_username || 'Someone', data.mode || 'normal');
+            try{ toast('⚔️ Duel request!'); }catch(e){}
+            return;
+          }
+          if(n.type === 'duel_accepted'){
+            const roomId = data.room_id;
+            if(!roomId) return;
+            try{
+              const { data: room } = await sb.from('duel_rooms').select('*').eq('id', roomId).maybeSingle();
+              if(room){
+                subscribeDuelRoom(room.id);
+                await handleDuelRoomUpdate(room, 'NOTIF');
+              }
+            }catch(e){}
+            try{ toast('⚔️ Opponent accepted!'); }catch(e){}
+            return;
+          }
+          if(n.type === 'duel_cancel'){
+            const roomId = data.room_id;
+            if(ACTIVE_DUEL && (!roomId || ACTIVE_DUEL.id === roomId)){
+              await handleDuelRoomUpdate(Object.assign({}, ACTIVE_DUEL, { status:'cancelled', locked:true }), 'NOTIF');
+            }
+            try{ toast('Duel cancelled'); }catch(e){}
+          }
         })
         .subscribe();
       if(!window.__gzChannels) window.__gzChannels = [];
