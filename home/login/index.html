@@ -200,18 +200,19 @@ button:disabled{opacity:.5;cursor:default;pointer-events:none;}
 }
 @keyframes checkerGlow{0%,100%{box-shadow:inset 0 0 0 1px rgba(0,0,0,.4),0 0 10px rgba(201,162,39,.15)}50%{box-shadow:inset 0 0 0 1px rgba(0,0,0,.4),0 0 20px rgba(201,162,39,.35)}}
 .puzzle-piece{position:absolute;z-index:2;border-radius:10px;box-sizing:border-box;pointer-events:auto;
-  background:linear-gradient(145deg,#e8c547 0%,#c9a227 40%,#8a6e12 100%);
-  border:2.5px solid #f0d878;
-  box-shadow:0 6px 18px rgba(0,0,0,.55),inset 0 1px 0 rgba(255,240,180,.45),0 0 12px rgba(201,162,39,.3);
+  background-color:transparent;
+  background-size:100% 100%;
+  background-repeat:no-repeat;
+  background-position:center;
+  border:2.5px solid rgba(201,162,39,.85);
+  box-shadow:0 6px 18px rgba(0,0,0,.55),inset 0 0 0 1px rgba(0,0,0,.25),0 0 12px rgba(201,162,39,.3);
   transform:translate3d(0,0,0);will-change:left,top;cursor:grab;touch-action:none;
-  display:flex;align-items:center;justify-content:center;
-  font-family:"Cinzel",Georgia,serif;font-weight:900;color:#2a1c10;
-  text-shadow:0 1px 0 rgba(255,240,180,.5);user-select:none;
+  user-select:none;
   transition:filter .15s,box-shadow .15s,transform .12s;
 }
-.puzzle-piece::after{content:'★';font-size:22px;line-height:1;pointer-events:none}
-.puzzle-piece.dragging{cursor:grabbing;filter:brightness(1.12);box-shadow:0 10px 26px rgba(0,0,0,.6),0 0 18px rgba(201,162,39,.45);z-index:5;transform:scale(1.04)}
-.puzzle-piece.solved{border-color:#f5e6a0;box-shadow:0 0 0 2px rgba(201,162,39,.55),0 0 24px rgba(201,162,39,.55);animation:pieceSnap .38s ease-out;filter:brightness(1.1)}
+.puzzle-piece::after{content:none !important;display:none !important;}
+.puzzle-piece.dragging{cursor:grabbing;filter:brightness(1.06);box-shadow:0 10px 26px rgba(0,0,0,.6),0 0 18px rgba(201,162,39,.4);z-index:5;transform:scale(1.04)}
+.puzzle-piece.solved{border-color:#f5e6a0;box-shadow:0 0 0 2px rgba(201,162,39,.55),0 0 24px rgba(201,162,39,.5);animation:pieceSnap .38s ease-out}
 @keyframes pieceSnap{0%{transform:scale(1.12)}55%{transform:scale(.94)}100%{transform:scale(1)}}
 .puzzle-hint{height:20px;line-height:20px;text-align:center;font-size:11px;color:var(--text-dim);overflow:hidden;white-space:nowrap;font-style:italic;margin-top:4px}
 .puzzle-status{height:16px;line-height:16px;text-align:center;font-size:12px;color:var(--text-dim);overflow:hidden;font-weight:600;letter-spacing:.02em}
@@ -279,7 +280,10 @@ html[data-theme="light"] .puzzle-target{
   background-size:12px 12px;background-position:0 0,0 6px,6px -6px,-6px 0;
   border-color:rgba(138,110,18,.55);
 }
-html[data-theme="light"] .puzzle-piece{color:#2a1c10;border-color:#c9a227;}
+html[data-theme="light"] .puzzle-piece{
+  border-color:rgba(138,110,18,.85);
+  background-color:transparent;
+}
 html[data-theme="light"] .loading-wrap{background:var(--bg);}
 html[data-theme="light"] .ban-card{background:var(--bg-elev);}
 html[data-theme="light"] .err-msg{background:rgba(139,26,26,.1);color:#8b1a1a;border-color:rgba(139,26,26,.3);}
@@ -306,8 +310,8 @@ html[data-theme="light"] .err-msg{background:rgba(139,26,26,.1);color:#8b1a1a;bo
         <input id="authWebsite" name="website" type="text" tabindex="-1" autocomplete="off">
       </div>
       <div class="verify-wrap">
-        <label>Place the gold mark on the checkered spot</label>
-        <div class="puzzle-wrap" id="puzzleCaptcha"><div class="puzzle-board" id="puzzleBoard"><canvas id="puzzleCanvas"></canvas><div class="puzzle-target" id="puzzleTarget"></div><div class="puzzle-piece" id="puzzlePiece"></div></div><div class="puzzle-hint">Drag the ★ onto the checkered square</div><div class="puzzle-status" id="puzzleStatus"></div></div>
+        <label>Drag the cut piece onto the checkered hole</label>
+        <div class="puzzle-wrap" id="puzzleCaptcha"><div class="puzzle-board" id="puzzleBoard"><canvas id="puzzleCanvas"></canvas><div class="puzzle-target" id="puzzleTarget"></div><div class="puzzle-piece" id="puzzlePiece"></div></div><div class="puzzle-hint">Put the image piece back into the checkered hole</div><div class="puzzle-status" id="puzzleStatus"></div></div>
       </div>
       <button class="btn btn-primary" id="authSubmitBtn">Log In</button>
       <div class="switch-line" id="authSwitchLine">Don't have an account? <a href="#" id="authSwitchLink">Sign up</a></div>
@@ -710,7 +714,7 @@ function puzzleMakeImage(){
   PUZZLE.size=s;c.width=w*2;c.height=h*2;
   const x=c.getContext('2d');x.setTransform(2,0,0,2,0,0);
 
-  // Western night / desert background (piece is NOT cut from this image)
+  // Western night / desert background — piece is cut from this image
   const themes=[
     {sky:['#0c0a12','#1a1420','#2a1c14']},
     {sky:['#0a0e14','#152028','#1e2a22']},
@@ -768,16 +772,48 @@ function puzzleMakeImage(){
   PUZZLE.pointerType='';PUZZLE.pressureSamples=[];PUZZLE.jitter=0;
   captchaToken=null;captchaTokenExp=0;
 
-  // checkerboard hole only — no image fragment
+  // Checkered hole = empty slot where the piece was cut from
   t.style.left=PUZZLE.targetX+'px';t.style.top=PUZZLE.targetY+'px';
   t.style.width=s+'px';t.style.height=s+'px';
 
-  // gold mark piece (NOT cut from background)
+  // Cut the exact image fragment from the captcha canvas at the hole position
+  // Canvas is 2x resolution (setTransform 2), so sample physical pixels
+  const scale = 2;
+  const pieceCanvas = document.createElement('canvas');
+  pieceCanvas.width = s * scale;
+  pieceCanvas.height = s * scale;
+  const pcx = pieceCanvas.getContext('2d');
+  try{
+    pcx.drawImage(
+      c,
+      PUZZLE.targetX * scale, PUZZLE.targetY * scale, s * scale, s * scale,
+      0, 0, s * scale, s * scale
+    );
+    // punch hole on main image so it matches "cut out" look under the target overlay
+    x.save();
+    x.globalCompositeOperation = 'destination-out';
+    x.beginPath();
+    const rr = 8;
+    const hx = PUZZLE.targetX, hy = PUZZLE.targetY;
+    x.moveTo(hx+rr, hy);
+    x.arcTo(hx+s, hy, hx+s, hy+s, rr);
+    x.arcTo(hx+s, hy+s, hx, hy+s, rr);
+    x.arcTo(hx, hy+s, hx, hy, rr);
+    x.arcTo(hx, hy, hx+s, hy, rr);
+    x.closePath();
+    x.fill();
+    x.restore();
+  }catch(e){ console.warn('piece cut', e); }
+
   p.classList.remove('solved','dragging');
-  p.style.backgroundImage='none';
-  p.style.width=s+'px';p.style.height=s+'px';
-  p.style.fontSize=Math.round(s*0.42)+'px';
-  p.style.top=py+'px';puzzleSetX(px);puzzleStatus('');
+  p.style.width = s+'px';
+  p.style.height = s+'px';
+  p.style.backgroundImage = 'url('+pieceCanvas.toDataURL('image/png')+')';
+  p.style.backgroundSize = '100% 100%';
+  p.style.backgroundRepeat = 'no-repeat';
+  p.style.top = py+'px';
+  puzzleSetX(px);
+  puzzleStatus('');
 }
 
 function puzzleSetPos(x,y){
