@@ -118,7 +118,29 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>Guessino | Number Guess</title>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script>
+(function(){
+  var urls=[
+    'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2',
+    'https://unpkg.com/@supabase/supabase-js@2',
+    'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.1/dist/umd/supabase.min.js',
+    'https://unpkg.com/@supabase/supabase-js@2.49.1/dist/umd/supabase.min.js'
+  ];
+  window.__sbLoadPromise=new Promise(function(resolve){
+    var i=0;
+    function next(){
+      if(typeof supabase!=='undefined'&&supabase.createClient){resolve(true);return;}
+      if(i>=urls.length){resolve(false);return;}
+      var s=document.createElement('script');
+      s.src=urls[i++];s.async=true;
+      s.onload=function(){if(typeof supabase!=='undefined')resolve(true);else next();};
+      s.onerror=function(){next();};
+      document.head.appendChild(s);
+    }
+    next();
+  });
+})();
+</script>
 <style>
 :root{
   --bg:#000000;
@@ -2047,12 +2069,39 @@ const SUPABASE_URL = "https://ihbsxjgzrhnssluqooqh.supabase.co";
 const SUPABASE_ANON_KEY = "sb_publishable_hHyHJI5JkxgLNrXAwZrGWQ_vbD3kdrj";
 
 let sb = null;
+async function ensureSupabase(){
+  if(sb) return sb;
+  try{
+    if(window.__sbLoadPromise){
+      await Promise.race([
+        window.__sbLoadPromise,
+        new Promise(r=>setTimeout(()=>r(false),7000))
+      ]);
+    }
+    if(typeof supabase==='undefined'||!supabase.createClient){
+      console.error('supabase library missing');
+      return null;
+    }
+    sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+      auth:{ persistSession:false, autoRefreshToken:false }
+    });
+    return sb;
+  }catch(e){
+    console.error('ensureSupabase', e);
+    sb = null;
+    return null;
+  }
+}
+// best-effort sync init if lib already present
 try{
-  if(SUPABASE_URL && !SUPABASE_URL.includes("YOUR-PROJECT") && SUPABASE_URL.length > 8 && SUPABASE_ANON_KEY){
+  if(typeof supabase!=='undefined' && SUPABASE_URL && SUPABASE_ANON_KEY){
     sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
   }
 }catch(e){}
-if(!sb){ document.getElementById('setupWarning').classList.remove('hidden'); }
+if(!sb){
+  const w=document.getElementById('setupWarning');
+  if(w) w.classList.remove('hidden');
+}
 
 const $ = id => document.getElementById(id);
 function toast(msg){
@@ -2686,34 +2735,59 @@ async function enforceBotServerPunishment(reason){
 }
 
 async function boot(){
-  if(!sb){ $('loadingScreen').classList.add('hidden'); return; }
   showLoading();
+  // never stay on loading forever
+  const forceLeave = setTimeout(()=>{
+    try{
+      const ls=$('loadingScreen');
+      if(ls && !ls.classList.contains('hidden')){
+        console.warn('boot timeout → login');
+        gzGoLogin();
+      }
+    }catch(e){ try{ gzGoLogin(); }catch(e2){} }
+  }, 12000);
   try{
+    await ensureSupabase();
+    if(!sb){
+      clearTimeout(forceLeave);
+      const w=$('setupWarning');
+      if(w){ w.classList.remove('hidden'); w.textContent = 'Database library failed to load. Check network/CDN and refresh.'; }
+      $('loadingScreen').classList.add('hidden');
+      // still send to login so user is not stuck
+      setTimeout(()=>{ try{ gzGoLogin(); }catch(e){} }, 1500);
+      return;
+    }
     await initDevice();
     try{
       const localUntil = isLocalBotBanned();
       if(localUntil){
         const r = (function(){ try{ return localStorage.getItem('gz_bot_ban_reason')||'automation'; }catch(e){ return 'automation'; }})();
         await enforceBotServerPunishment(r);
+        clearTimeout(forceLeave);
         return;
       }
       const hard = detectHardBotSignals();
       if(hard.length){
         await enforceBotServerPunishment(hard.join(','));
+        clearTimeout(forceLeave);
         return;
       }
     }catch(e){ console.warn('bot enforce boot', e); }
     const devBan = await getActiveDeviceBan();
-    if(devBan){ showDeviceBanScreen(devBan); return; }
+    if(devBan){ showDeviceBanScreen(devBan); clearTimeout(forceLeave); return; }
     const savedId = localStorage.getItem('gz_user_id');
     if(savedId){
-      const { data: user, error } = await sb.from('users').select('*').eq('id', savedId).maybeSingle();
-      if(!error && user){ await enterSession(user, { fromSaved: true }); return; }
+      try{
+        const { data: user, error } = await sb.from('users').select('*').eq('id', savedId).maybeSingle();
+        if(!error && user){ await enterSession(user, { fromSaved: true }); clearTimeout(forceLeave); return; }
+      }catch(e){ console.warn('session load', e); }
       localStorage.removeItem('gz_user_id');
     }
+    clearTimeout(forceLeave);
     gzGoLogin();
   }catch(e){
     console.error(e);
+    clearTimeout(forceLeave);
     gzGoLogin();
   }
 }
