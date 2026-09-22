@@ -2165,20 +2165,52 @@ function avatarColorFor(seed){
   for(let i=0;i<s.length;i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
   return AVATAR_PALETTE[h % AVATAR_PALETTE.length];
 }
+function isValidAvatarUrl(url){
+  if(!url || typeof url !== 'string') return false;
+  const u = url.trim();
+  if(!u || u.length < 12) return false;
+  // data URL must be image/*
+  if(/^data:image\/(png|jpe?g|gif|webp|svg\+xml);base64,/i.test(u)) return true;
+  // http(s) image-looking URL
+  if(/^https?:\/\//i.test(u) && /\.(png|jpe?g|gif|webp|svg)(\?|$)/i.test(u)) return true;
+  // supabase storage / common CDN without extension
+  if(/^https?:\/\//i.test(u) && (u.includes('supabase') || u.includes('/storage/') || u.includes('avatar'))) return true;
+  return false;
+}
+function renderDefaultAvatar(el, user){
+  const name = user ? (user.username || '?') : '?';
+  const letter = initials(name);
+  const bg = avatarColorFor(user && user.id ? user.id : name);
+  el.style.background = bg;
+  el.style.color = '#fff';
+  el.innerHTML = letter;
+}
 function renderAvatar(el, user){
   if(!el) return;
   el.style.overflow = 'hidden';
   el.style.borderRadius = '50%';
-  if(user && user.avatar_url){
+  const url = user && user.avatar_url;
+  if(isValidAvatarUrl(url)){
     el.style.background = 'transparent';
-    el.innerHTML = `<img src="${user.avatar_url}" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:50%;display:block;">`;
+    const img = document.createElement('img');
+    img.alt = '';
+    img.style.cssText = 'width:100%;height:100%;object-fit:cover;border-radius:50%;display:block;';
+    img.src = url;
+    img.onerror = ()=>{
+      // not a real image → clear bad url once (best effort) + default
+      renderDefaultAvatar(el, user);
+      if(user && user.id && CURRENT_USER && user.id === CURRENT_USER.id){
+        try{ sb.from('users').update({ avatar_url: null }).eq('id', user.id).then(()=>{ CURRENT_USER.avatar_url = null; }); }catch(e){}
+      }
+    };
+    el.innerHTML = '';
+    el.appendChild(img);
   } else {
-    const name = user ? (user.username || '?') : '?';
-    const letter = initials(name);
-    const bg = avatarColorFor(user && user.id ? user.id : name);
-    el.style.background = bg;
-    el.style.color = '#fff';
-    el.innerHTML = letter;
+    if(url && user && CURRENT_USER && user.id === CURRENT_USER.id){
+      // garbage value stored → clear
+      try{ sb.from('users').update({ avatar_url: null }).eq('id', user.id).then(()=>{ CURRENT_USER.avatar_url = null; }); }catch(e){}
+    }
+    renderDefaultAvatar(el, user);
   }
 }
 function fmtDate(d){
@@ -3292,11 +3324,12 @@ async function bumpQuestProgressOnWin(guesses, streak){
   for(const q of quests){
     const pk = q.type === 'weekly' ? weeklyKey : dailyKey;
     let add = 0;
-    if(q.code === 'daily_win_3' || q.code === 'weekly_win_15') add = 1;
+    if(q.code === 'daily_win_3' || q.code === 'weekly_win_15' || q.code === 'daily_play_5') add = 1;
     else if(q.code === 'daily_guess_20') add = guesses;
-    else if(q.code === 'daily_streak_2') add = streak >= 2 ? 1 : 0;
-    else if(q.code === 'weekly_modes') add = 0; // handled separately if needed
-    else add = 1; // generic win quests
+    else if(q.code === 'daily_streak_2') add = streak >= 3 ? 1 : 0;
+    else if(q.code === 'weekly_modes') add = 0;
+    else if(q.code === 'weekly_duel_3') add = 0; // awarded from duel win
+    else add = 1;
 
     if(add <= 0) continue;
 
@@ -3974,9 +4007,19 @@ $('savePasswordBtn').onclick = async ()=>{
   toast('Password updated');
 };
 
-$('logoutBtn').onclick = ()=>{
-  localStorage.removeItem('gz_user_id');
+$('logoutBtn').onclick = async ()=>{
+  try{
+    if(CURRENT_USER && DEVICE_ID && sb){
+      // Remove this device from account sessions (only logged-in devices remain)
+      await sb.from('devices').delete()
+        .eq('user_id', CURRENT_USER.id)
+        .eq('device_id', DEVICE_ID);
+    }
+  }catch(e){ console.warn('logout device cleanup', e); }
+  try{ localStorage.removeItem('gz_user_id'); }catch(e){}
   CURRENT_USER = null;
+  try{ if(window.__onlineTimer) clearInterval(window.__onlineTimer); }catch(e){}
+  try{ if(window.__gzChannels){ window.__gzChannels.forEach(ch=>{ try{ sb.removeChannel(ch); }catch(e){} }); window.__gzChannels=[]; } }catch(e){}
   gzGoLogin();
 };
 
@@ -4394,20 +4437,33 @@ async function sendChatMessage(){
   const text = $('chatTextInput').value.trim();
   if(!text) return;
   if(!chatPartner) return;
+  if(window.__chatSending) return;
   if(!rateOk('lastChat', RATE.chatMs)){ toast('Slow down'); return; }
-  const payload = {
-    sender_id: CURRENT_USER.id, receiver_id: chatPartner.id,
-    content: text, image_url: null,
-    reply_to_id: chatReplyTarget ? chatReplyTarget.id : null
-  };
-  const { data: saved, error } = await sb.from('messages').insert(payload).select().single();
-  if(error){ toast('Send failed'); return; }
-  chatMsgMap[saved.id] = saved;
-  appendMessageBubble(saved);
-  scrollChatToBottom();
-  $('chatTextInput').value = '';
-  chatReplyTarget = null;
-  $('replyBar').classList.add('hidden');
+  const btn = $('chatSendBtn');
+  const input = $('chatTextInput');
+  window.__chatSending = true;
+  if(btn){ btn.disabled = true; btn.innerHTML = '<span class="gz-spin" aria-hidden="true"></span>'; }
+  if(input) input.disabled = true;
+  try{
+    const payload = {
+      sender_id: CURRENT_USER.id, receiver_id: chatPartner.id,
+      content: text, image_url: null,
+      reply_to_id: chatReplyTarget ? chatReplyTarget.id : null
+    };
+    const { data: saved, error } = await sb.from('messages').insert(payload).select().single();
+    if(error){ toast('Send failed'); return; }
+    chatMsgMap[saved.id] = saved;
+    appendMessageBubble(saved);
+    scrollChatToBottom();
+    if(input) input.value = '';
+    chatReplyTarget = null;
+    const rb = $('replyBar'); if(rb) rb.classList.add('hidden');
+  }catch(e){ toast('Send failed'); }
+  finally{
+    window.__chatSending = false;
+    if(btn){ btn.disabled = false; btn.innerHTML = '➤'; }
+    if(input) input.disabled = false;
+  }
 }
 
 /* ---------- SUPPORT ---------- */
@@ -6541,13 +6597,14 @@ async function loadQuestsUI(){
       const p = progMap[q.id + '|' + pk] || { progress:0, completed:false, claimed:false };
       const pct = Math.min(100, Math.round((p.progress / Math.max(1,q.target_value)) * 100));
       const done = p.completed || p.progress >= q.target_value;
-      const reward = (q.reward_xp?`+${q.reward_xp} XP`:'') + (q.reward_crowns?` · 🏆${q.reward_crowns}`:'');
+      const reward = (q.reward_xp?`+${q.reward_xp} XP`:'') + (q.reward_crowns?` · ⚔️${q.reward_crowns}`:'');
+      const typeLabel = q.type === 'weekly' ? 'Weekly' : (q.type === 'daily' ? 'Daily' : q.type);
       return `<div class="quest-card ${done?'done':''}">
-        <div class="q-title">${escapeHtml(q.title)} <span style="font-size:10px;color:var(--text-dim);text-transform:uppercase;margin-left:4px;">${escapeHtml(q.type)}</span></div>
+        <div class="q-title">${escapeHtml(q.title)} <span style="font-size:10px;color:var(--text-dim);margin-left:4px;">${escapeHtml(typeLabel)}</span></div>
         <div class="q-desc">${escapeHtml(q.description||'')}</div>
         <div class="quest-progress"><i style="width:${pct}%"></i></div>
         <div class="quest-meta">
-          <span>${p.progress}/${q.target_value}</span>
+          <span>${Math.min(p.progress,q.target_value)}/${q.target_value}${done?' ✓':''}</span>
           <span class="quest-reward">${reward || 'Reward'}</span>
         </div>
       </div>`;
@@ -6858,17 +6915,29 @@ async function sendClanChatFrom(inputEl, refreshFn){
   if(!MY_CLAN||!CURRENT_USER) return toast('Join a clan first');
   const body = (inputEl && inputEl.value || '').trim();
   if(!body) return;
-  if(inputEl) inputEl.value = '';
-  const { error } = await sb.from('clan_messages').insert({
-    clan_id: MY_CLAN.clan.id,
-    sender_id: CURRENT_USER.id,
-    sender_username: CURRENT_USER.username,
-    msg_type: 'chat',
-    body
-  });
-  if(error){ toast(error.message||'Send failed'); return; }
-  if(typeof refreshFn === 'function') await refreshFn();
-  else await loadClanChat();
+  if(window.__clanChatSending) return;
+  window.__clanChatSending = true;
+  const sendBtns = [$('clanChatSendBtn'), $('chatClanSendBtn')].filter(Boolean);
+  sendBtns.forEach(b=>{ b.disabled = true; b.dataset._old = b.innerHTML; b.innerHTML = '<span class="gz-spin"></span>'; });
+  if(inputEl){ inputEl.disabled = true; }
+  try{
+    if(inputEl) inputEl.value = '';
+    const { error } = await sb.from('clan_messages').insert({
+      clan_id: MY_CLAN.clan.id,
+      sender_id: CURRENT_USER.id,
+      sender_username: CURRENT_USER.username,
+      msg_type: 'chat',
+      body
+    });
+    if(error){ toast(error.message||'Send failed'); return; }
+    if(typeof refreshFn === 'function') await refreshFn();
+    else await loadClanChat();
+  }catch(e){ toast('Send failed'); }
+  finally{
+    window.__clanChatSending = false;
+    sendBtns.forEach(b=>{ b.disabled = false; b.innerHTML = b.dataset._old || 'Send'; });
+    if(inputEl) inputEl.disabled = false;
+  }
 }
 
 async function sendClanChat(){
@@ -7495,6 +7564,19 @@ async function onDuelFinished(room){
       }
     }catch(e){}
     toast('🏆 Duel win! ⚔️ '+(CURRENT_USER.duel_wins||1));
+    try{
+      const weeklyKey = currentPeriodKey('weekly');
+      const { data: dq } = await sb.from('quests').select('id,target_value').eq('code','weekly_duel_3').eq('active',true).maybeSingle();
+      if(dq){
+        const { data: row } = await sb.from('user_quests').select('*').eq('user_id',CURRENT_USER.id).eq('quest_id',dq.id).eq('period_key',weeklyKey).maybeSingle();
+        if(!row){
+          await sb.from('user_quests').insert({ user_id:CURRENT_USER.id, quest_id:dq.id, progress:1, completed:false, period_key:weeklyKey });
+        } else if(!row.completed){
+          const prog = Math.min(dq.target_value, (row.progress||0)+1);
+          await sb.from('user_quests').update({ progress:prog, completed: prog>=dq.target_value, updated_at:new Date().toISOString() }).eq('id', row.id);
+        }
+      }
+    }catch(e){}
   } else {
     try{
       if(CURRENT_USER && (CURRENT_USER.current_streak||0) > 0){
