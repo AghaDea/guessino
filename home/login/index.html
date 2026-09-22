@@ -4,7 +4,30 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>Guessino · Login</title>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script>
+(function(){
+  var urls = [
+    'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2',
+    'https://unpkg.com/@supabase/supabase-js@2',
+    'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.1/dist/umd/supabase.min.js',
+    'https://unpkg.com/@supabase/supabase-js@2.49.1/dist/umd/supabase.min.js'
+  ];
+  window.__sbLoadPromise = new Promise(function(resolve){
+    var i = 0;
+    function next(){
+      if (typeof supabase !== 'undefined' && supabase.createClient) { resolve(true); return; }
+      if (i >= urls.length) { resolve(false); return; }
+      var s = document.createElement('script');
+      s.src = urls[i++];
+      s.async = true;
+      s.onload = function(){ if (typeof supabase !== 'undefined') resolve(true); else next(); };
+      s.onerror = function(){ next(); };
+      document.head.appendChild(s);
+    }
+    next();
+  });
+})();
+</script>
 <style>
 
 /* ========== RED DEAD REDEMPTION theme — visual only ========== */
@@ -307,11 +330,78 @@ html[data-theme="light"] .err-msg{background:rgba(139,26,26,.1);color:#8b1a1a;bo
 const SUPABASE_URL = "https://ihbsxjgzrhnssluqooqh.supabase.co";
 const SUPABASE_ANON_KEY = "sb_publishable_hHyHJI5JkxgLNrXAwZrGWQ_vbD3kdrj";
 let sb = null;
-try {
-  if (SUPABASE_URL && !SUPABASE_URL.includes("YOUR-PROJECT") && SUPABASE_URL.length > 8 && SUPABASE_ANON_KEY) {
-    sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+let sbInitError = null;
+
+async function ensureSupabase(){
+  if(sb) return sb;
+  try{
+    // wait for CDN (max ~6s)
+    if(window.__sbLoadPromise){
+      const ok = await Promise.race([
+        window.__sbLoadPromise,
+        new Promise(r => setTimeout(() => r(false), 6000))
+      ]);
+      if(!ok && typeof supabase === 'undefined'){
+        sbInitError = 'library_load_failed';
+        return null;
+      }
+    }
+    if(typeof supabase === 'undefined' || !supabase.createClient){
+      sbInitError = 'library_missing';
+      return null;
+    }
+    if(!SUPABASE_URL || SUPABASE_URL.includes('YOUR-PROJECT') || !SUPABASE_ANON_KEY){
+      sbInitError = 'config_missing';
+      return null;
+    }
+    sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+      auth: { persistSession: false, autoRefreshToken: false },
+      global: { headers: { 'x-client-info': 'guessino-login' } }
+    });
+    // lightweight connectivity probe
+    try{
+      const { error } = await Promise.race([
+        sb.from('users').select('id').limit(1),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('probe_timeout')), 5000))
+      ]);
+      // RLS may block; network/key errors matter more
+      if(error){
+        const m = String(error.message||'').toLowerCase();
+        if(m.includes('invalid api key') || m.includes('jwt') || m.includes('api key')){
+          sbInitError = 'invalid_key';
+        }
+        // still keep client — many tables allow anon with open RLS
+      }
+    }catch(e){
+      const m = String(e && e.message || e).toLowerCase();
+      if(m.includes('failed to fetch') || m.includes('network') || m.includes('probe_timeout')){
+        sbInitError = 'network';
+      }
+    }
+    return sb;
+  }catch(e){
+    sbInitError = 'create_failed';
+    console.error('supabase init', e);
+    sb = null;
+    return null;
   }
-} catch (e) { sb = null; }
+}
+
+function sbNotConnectedMessage(){
+  if(sbInitError === 'library_load_failed' || sbInitError === 'library_missing'){
+    return 'Could not load database library. Check network / CDN (jsDelivr or unpkg) and try again.';
+  }
+  if(sbInitError === 'invalid_key'){
+    return 'Invalid Supabase API key. Put the anon public key from Project Settings → API.';
+  }
+  if(sbInitError === 'network'){
+    return 'Cannot reach Supabase. Check internet, VPN, or DNS and try again.';
+  }
+  if(sbInitError === 'config_missing'){
+    return 'Supabase URL/key is not configured.';
+  }
+  return 'Database is not connected. Please check your connection.';
+}
 
 const $ = (id) => document.getElementById(id);
 let authMode = 'login';
@@ -1119,7 +1209,8 @@ async function submitAuth(){
 
   const vErr = await checkPuzzleCaptcha();
   if(vErr){ errBox.textContent=vErr; errBox.classList.remove('hidden'); recordFail(); return; }
-  if(!sb){ errBox.textContent='Database is not connected. Please check your internet connection.'; errBox.classList.remove('hidden'); return; }
+  if(!sb){ await ensureSupabase(); }
+if(!sb){ errBox.textContent=sbNotConnectedMessage(); errBox.classList.remove('hidden'); return; }
 
   btn.disabled = true;
   const oldLabel = btn.textContent;
@@ -1236,10 +1327,11 @@ async function boot(){
   },4500);
 
   try{
+    await ensureSupabase();
     if(!sb){
       finished=true;
       showAuth('login');
-      $('authError').textContent='Database is not connected. Please check your connection.';
+      $('authError').textContent=sbNotConnectedMessage();
       $('authError').classList.remove('hidden');
       return;
     }
