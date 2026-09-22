@@ -1433,7 +1433,7 @@ html:not([data-theme="light"]) .modal-bg{background:rgba(0,0,0,.78);}
   </div>
 
   <div id="setupWarning" class="setup-warning hidden">
-    Supabase is not configured. Open the file and set <b>SUPABASE_URL</b> and <b>SUPABASE_ANON_KEY</b>, then run the SQL schema.
+    Connecting to database… If this stays, check your internet and refresh.
   </div>
 
   <div id="authScreen" class="auth-wrap hidden">
@@ -2070,21 +2070,32 @@ const SUPABASE_ANON_KEY = "sb_publishable_hHyHJI5JkxgLNrXAwZrGWQ_vbD3kdrj";
 
 let sb = null;
 async function ensureSupabase(){
-  if(sb) return sb;
+  if(sb) { try{ setDbWarning(false); }catch(e){} return sb; }
   try{
-    if(window.__sbLoadPromise){
-      await Promise.race([
-        window.__sbLoadPromise,
-        new Promise(r=>setTimeout(()=>r(false),7000))
-      ]);
+    // Wait for CDN script(s); retry a few times if slow network
+    for(let attempt=0; attempt<4; attempt++){
+      if(typeof supabase!=='undefined' && supabase.createClient) break;
+      if(window.__sbLoadPromise){
+        await Promise.race([
+          window.__sbLoadPromise,
+          new Promise(r=>setTimeout(()=>r(false), 3500))
+        ]);
+      }
+      if(typeof supabase!=='undefined' && supabase.createClient) break;
+      await new Promise(r=>setTimeout(r, 400 + attempt*300));
     }
     if(typeof supabase==='undefined'||!supabase.createClient){
-      console.error('supabase library missing');
+      console.error('supabase library missing after retries');
+      return null;
+    }
+    if(!SUPABASE_URL || !SUPABASE_ANON_KEY || SUPABASE_URL.includes('YOUR-PROJECT')){
+      console.error('supabase config missing');
       return null;
     }
     sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
       auth:{ persistSession:false, autoRefreshToken:false }
     });
+    try{ setDbWarning(false); }catch(e){}
     return sb;
   }catch(e){
     console.error('ensureSupabase', e);
@@ -2092,15 +2103,23 @@ async function ensureSupabase(){
     return null;
   }
 }
-// best-effort sync init if lib already present
+// best-effort sync init if lib already present (do NOT show warning yet — CDN may still be loading)
 try{
-  if(typeof supabase!=='undefined' && SUPABASE_URL && SUPABASE_ANON_KEY){
-    sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  if(typeof supabase!=='undefined' && supabase.createClient && SUPABASE_URL && SUPABASE_ANON_KEY){
+    sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+      auth:{ persistSession:false, autoRefreshToken:false }
+    });
   }
 }catch(e){}
-if(!sb){
-  const w=document.getElementById('setupWarning');
-  if(w) w.classList.remove('hidden');
+function setDbWarning(show, msg){
+  const w = document.getElementById('setupWarning');
+  if(!w) return;
+  if(show){
+    if(msg) w.innerHTML = msg;
+    w.classList.remove('hidden');
+  } else {
+    w.classList.add('hidden');
+  }
 }
 
 const $ = id => document.getElementById(id);
@@ -2750,8 +2769,7 @@ async function boot(){
     await ensureSupabase();
     if(!sb){
       clearTimeout(forceLeave);
-      const w=$('setupWarning');
-      if(w){ w.classList.remove('hidden'); w.textContent = 'Database library failed to load. Check network/CDN and refresh.'; }
+      setDbWarning(true, 'Could not connect to database (network or CDN). Pull to refresh and try again.');
       $('loadingScreen').classList.add('hidden');
       // still send to login so user is not stuck
       setTimeout(()=>{ try{ gzGoLogin(); }catch(e){} }, 1500);
@@ -2905,6 +2923,8 @@ $('banLogoutBtn').onclick = ()=>{ localStorage.removeItem('gz_user_id'); gzGoLog
 
 /* ---------- SESSION ---------- */
 async function enterSession(user, opts){
+  try{ setDbWarning(false); }catch(e){}
+
   opts = opts || {};
   if(!DEVICE_ID) await initDevice();
 
