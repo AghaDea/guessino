@@ -1942,6 +1942,36 @@ html[data-theme="light"] .field label{color:var(--gold) !important;}
 <div id="toast" class="toast"></div>
 
 
+
+
+<!-- Duel create modal -->
+<div class="modal-bg hidden" id="duelCreateModal">
+  <div class="modal-box">
+    <button type="button" class="modal-close" id="closeDuelCreate">✕</button>
+    <h3>⚔️ Challenge to Duel</h3>
+    <p style="text-align:center;color:var(--text-dim);font-size:13px;margin:0 0 10px;">Invite <b id="duelTargetName">user</b> to a live 1v1 race. Same number — first correct guess wins.</p>
+    <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;font-weight:700;">Mode (chosen by you)</div>
+    <div class="duel-mode-select" id="duelModeSelect">
+      <button type="button" data-mode="easy">Easy</button>
+      <button type="button" data-mode="normal" class="active">Normal</button>
+      <button type="button" data-mode="hard">Hard</button>
+      <button type="button" data-mode="extreme">Extreme</button>
+    </div>
+    <button type="button" class="btn btn-primary" id="duelSendBtn" style="margin-top:8px;">Send duel request</button>
+    <div style="font-size:11px;color:var(--text-dim);margin-top:10px;line-height:1.5;text-align:center;">Both players must be online. Opponent gets a live notification to accept or decline.</div>
+  </div>
+</div>
+
+<!-- Duel invite accept modal -->
+<div class="modal-bg hidden" id="duelInviteModal">
+  <div class="modal-box">
+    <h3>⚔️ Duel Request</h3>
+    <p id="duelInviteText" style="text-align:center;color:var(--text);font-size:14px;line-height:1.55;margin:8px 0 16px;"></p>
+    <div class="confirm-actions">
+      <button type="button" class="btn btn-ghost" id="duelDeclineBtn" style="background:var(--bg);color:var(--text);">Decline</button>
+      <button type="button" class="btn btn-primary" id="duelAcceptBtn">Accept</button>
+    </div>
+
 <script>
 
 function gzBaseDir(){
@@ -7128,8 +7158,9 @@ function clearDuelLocal(keepOverlayMs){
 async function openDuelCreateModal(u){
   if(!CURRENT_USER || !u) return;
   if(u.id === CURRENT_USER.id) return toast('Cannot duel yourself');
-  if(!isOnline(u.last_online)) return toast('Opponent must be online');
-  if(!isOnline(CURRENT_USER.last_online)) return toast('You must be online');
+  // Viewer is always treated as online while using the app
+  const oppOk = u.last_online && (Date.now() - new Date(u.last_online).getTime()) < 10*60*1000;
+  if(!oppOk) return toast('Opponent must be online');
   if(isDuelActive()) return toast('You already have an active duel');
   DUEL_TARGET_USER = u;
   if($('duelTargetName')) $('duelTargetName').textContent = '@'+(u.username||'user');
@@ -7148,7 +7179,8 @@ async function openDuelCreateModal(u){
 }
 
 async function sendDuelRequest(){
-  if(!CURRENT_USER || !DUEL_TARGET_USER) return;
+  if(!CURRENT_USER || !DUEL_TARGET_USER){ toast('No target user'); return; }
+  if(!sb){ toast('Database not connected'); return; }
   const wrap = $('duelModeSelect');
   let mode = 'normal';
   if(wrap){
@@ -7158,42 +7190,99 @@ async function sendDuelRequest(){
   const btn = $('duelSendBtn');
   if(btn){ btn.disabled = true; btn.textContent = 'Sending…'; }
   try{
-    // refresh opponent online
+    // Mark ourselves online + cancel our own stale pending rooms (>30 min)
+    try{
+      await sb.from('users').update({ last_online: new Date().toISOString() }).eq('id', CURRENT_USER.id);
+      CURRENT_USER.last_online = new Date().toISOString();
+    }catch(e){}
+    try{
+      const stale = new Date(Date.now() - 30*60*1000).toISOString();
+      await sb.from('duel_rooms').update({ status:'cancelled', locked:true, finished_at: new Date().toISOString() })
+        .in('status', ['pending','active'])
+        .or('creator_id.eq.'+CURRENT_USER.id+',opponent_id.eq.'+CURRENT_USER.id)
+        .lt('created_at', stale);
+    }catch(e){}
+
     const { data: opp } = await sb.from('users').select('id,username,last_online,banned').eq('id', DUEL_TARGET_USER.id).maybeSingle();
     if(!opp || opp.banned) { toast('User unavailable'); return; }
-    if(!isOnline(opp.last_online)) { toast('Opponent went offline'); return; }
+    // soft online: 10 minutes window for request
+    const oppOnline = opp.last_online && (Date.now() - new Date(opp.last_online).getTime()) < 10*60*1000;
+    if(!oppOnline){ toast('Opponent is offline'); return; }
 
-    const { data, error } = await sb.rpc('create_duel_v2', {
-      p_creator_id: CURRENT_USER.id,
-      p_opponent_id: DUEL_TARGET_USER.id,
-      p_mode: mode,
-      p_online_minutes: 5
-    });
-    if(error){ toast(error.message||'Failed to create duel'); return; }
-    const res = data || {};
-    if(!res.ok){
-      const reasons = {
-        opponent_offline: 'Opponent is offline',
-        creator_offline: 'You appear offline — wait a moment',
-        busy: 'One of you already has a pending/active duel',
-        banned: 'Account banned',
-        self: 'Cannot duel yourself'
-      };
-      toast(reasons[res.reason] || ('Cannot create: '+(res.reason||'error')));
-      return;
+    let room = null;
+    // Prefer RPC if schema applied
+    try{
+      const { data, error } = await sb.rpc('create_duel_v2', {
+        p_creator_id: CURRENT_USER.id,
+        p_opponent_id: DUEL_TARGET_USER.id,
+        p_mode: mode,
+        p_online_minutes: 10
+      });
+      if(error){
+        console.warn('create_duel_v2', error);
+        // fall through to direct insert
+        if(String(error.message||'').toLowerCase().includes('function') || error.code === 'PGRST202'){
+          room = null; // will use fallback
+        } else {
+          // other RPC error — still try fallback for robustness
+          room = null;
+        }
+      } else {
+        const res = data || {};
+        if(!res.ok){
+          const reasons = {
+            opponent_offline: 'Opponent is offline',
+            creator_offline: 'You appear offline — wait a moment and try again',
+            busy: 'One of you already has a pending/active duel — cancel it first',
+            banned: 'Account banned',
+            self: 'Cannot duel yourself',
+            user_not_found: 'User not found'
+          };
+          toast(reasons[res.reason] || ('Cannot create: '+(res.reason||'error')));
+          return;
+        }
+        room = res.room;
+      }
+    }catch(e){ console.warn('rpc', e); room = null; }
+
+    // Fallback: direct insert (works if table exists + RLS open)
+    if(!room){
+      // check busy
+      const { data: busy } = await sb.from('duel_rooms').select('id').in('status',['pending','active'])
+        .or('creator_id.eq.'+CURRENT_USER.id+',opponent_id.eq.'+CURRENT_USER.id+',creator_id.eq.'+DUEL_TARGET_USER.id+',opponent_id.eq.'+DUEL_TARGET_USER.id)
+        .limit(1).maybeSingle();
+      if(busy && busy.id){
+        toast('One of you already has a pending/active duel — cancel it first');
+        return;
+      }
+      const ranges = { easy:[0,10000], normal:[10000,500000], hard:[500000,1000000], extreme:[1000000,5000000] };
+      const r = ranges[mode] || ranges.normal;
+      const target = r[0] + Math.floor(Math.random() * (r[1]-r[0]+1));
+      const { data: ins, error: ie } = await sb.from('duel_rooms').insert({
+        creator_id: CURRENT_USER.id,
+        opponent_id: DUEL_TARGET_USER.id,
+        mode: mode,
+        target: target,
+        status: 'pending'
+      }).select().single();
+      if(ie){
+        toast(ie.message || 'Failed — run SQL v3.3 (duel_rooms) in Supabase');
+        console.error('duel insert', ie);
+        return;
+      }
+      room = ins;
     }
-    const room = res.room;
+
     ACTIVE_DUEL = room;
-    $('duelCreateModal').classList.add('hidden');
-    toast('Duel request sent to @'+DUEL_TARGET_USER.username);
-    // notify opponent
+    if($('duelCreateModal')) $('duelCreateModal').classList.add('hidden');
+    toast('Duel request sent to @'+(DUEL_TARGET_USER.username||'user'));
     await pushNotification(DUEL_TARGET_USER.id, 'duel_invite', '⚔️ Duel request',
       '@'+CURRENT_USER.username+' challenges you to a '+mode+' duel. Accept?',
       { room_id: room.id, from_user_id: CURRENT_USER.id, from_username: CURRENT_USER.username, mode: mode, status: 'pending' });
     subscribeDuelRoom(room.id);
     showDuelBanner();
-    // stay on current page; when accepted, auto-jump to game
   }catch(e){
+    console.error(e);
     toast(String(e.message||e));
   }finally{
     if(btn){ btn.disabled = false; btn.textContent = 'Send duel request'; }
@@ -7305,9 +7394,17 @@ async function cancelActiveDuel(){
   if(!ACTIVE_DUEL || !CURRENT_USER) return;
   const id = ACTIVE_DUEL.id;
   try{
-    const { data, error } = await sb.rpc('cancel_duel', { p_room_id: id, p_user_id: CURRENT_USER.id });
-    if(error){ toast(error.message||'Cancel failed'); return; }
-    // also notify other side via notification (optional)
+    let ok = false;
+    try{
+      const { data, error } = await sb.rpc('cancel_duel', { p_room_id: id, p_user_id: CURRENT_USER.id });
+      if(!error && data && data.ok) ok = true;
+    }catch(e){}
+    if(!ok){
+      const { error } = await sb.from('duel_rooms').update({
+        status:'cancelled', locked:true, finished_at: new Date().toISOString(), updated_at: new Date().toISOString()
+      }).eq('id', id);
+      if(error){ toast(error.message||'Cancel failed'); return; }
+    }
     const other = duelOpponentId();
     if(other){
       try{ await pushNotification(other, 'duel_cancel', 'Duel cancelled', '@'+CURRENT_USER.username+' cancelled the duel', { room_id: id }); }catch(e){}
@@ -7320,35 +7417,60 @@ async function cancelActiveDuel(){
 
 async function claimDuelWinIfNeeded(guesses){
   if(!isDuelPlaying() || !CURRENT_USER) return false;
-  // lock UI immediately client-side until server responds
   setDuelUiLocked(true, 'Checking result…', 'Waiting for server to confirm the winner');
+  const g = guesses || currentGuessCount || 1;
   try{
-    const { data, error } = await sb.rpc('claim_duel_win', {
-      p_room_id: ACTIVE_DUEL.id,
-      p_user_id: CURRENT_USER.id,
-      p_guesses: guesses || currentGuessCount || 1
-    });
-    if(error){
-      // still locked until realtime update
-      toast(error.message||'Server error');
-      return false;
-    }
-    const res = data || {};
-    if(res.ok && res.room){
-      await handleDuelRoomUpdate(res.room, 'UPDATE');
-      return true;
-    }
-    if(res.reason === 'locked' || res.reason === 'not_active'){
-      // someone else won first
-      if(res.winner_id){
-        ACTIVE_DUEL = Object.assign({}, ACTIVE_DUEL, { status:'finished', winner_id: res.winner_id, locked:true });
-        await onDuelFinished(ACTIVE_DUEL);
+    let room = null;
+    let winnerId = null;
+    try{
+      const { data, error } = await sb.rpc('claim_duel_win', {
+        p_room_id: ACTIVE_DUEL.id,
+        p_user_id: CURRENT_USER.id,
+        p_guesses: g
+      });
+      if(!error && data){
+        if(data.ok && data.room){ room = data.room; winnerId = data.winner_id; }
+        else if(data.reason === 'locked' || data.reason === 'not_active'){
+          if(data.winner_id){
+            ACTIVE_DUEL = Object.assign({}, ACTIVE_DUEL, { status:'finished', winner_id: data.winner_id, locked:true });
+            await onDuelFinished(ACTIVE_DUEL);
+          }
+          return false;
+        }
       }
-      return false;
+    }catch(e){ console.warn('claim rpc', e); }
+    if(!room){
+      // fallback atomic-ish: only update if still active and not locked
+      const patch = {
+        locked: true,
+        status: 'finished',
+        winner_id: CURRENT_USER.id,
+        finished_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      };
+      if(ACTIVE_DUEL.creator_id === CURRENT_USER.id) patch.creator_guesses = g;
+      else patch.opponent_guesses = g;
+      const { data: upd, error: ue } = await sb.from('duel_rooms').update(patch)
+        .eq('id', ACTIVE_DUEL.id).eq('status','active').eq('locked', false).select().single();
+      if(ue || !upd){
+        // maybe opponent won first — fetch
+        const { data: cur } = await sb.from('duel_rooms').select('*').eq('id', ACTIVE_DUEL.id).maybeSingle();
+        if(cur && cur.status === 'finished'){
+          await handleDuelRoomUpdate(cur, 'UPDATE');
+          return false;
+        }
+        toast((ue && ue.message) || 'Could not confirm win');
+        setDuelUiLocked(false);
+        return false;
+      }
+      room = upd;
+      winnerId = upd.winner_id;
     }
-    return false;
+    await handleDuelRoomUpdate(room, 'UPDATE');
+    return true;
   }catch(e){
     toast(String(e.message||e));
+    setDuelUiLocked(false);
     return false;
   }
 }
@@ -7363,20 +7485,31 @@ async function showDuelInviteModal(roomId, fromUsername, mode){
 async function acceptDuelInvite(){
   if(!_pendingDuelInviteRoomId || !CURRENT_USER) return;
   const roomId = _pendingDuelInviteRoomId;
-  $('duelInviteModal').classList.add('hidden');
+  if($('duelInviteModal')) $('duelInviteModal').classList.add('hidden');
   try{
-    const { data, error } = await sb.rpc('accept_duel', { p_room_id: roomId, p_user_id: CURRENT_USER.id });
-    if(error){ toast(error.message||'Accept failed'); return; }
-    const res = data || {};
-    if(!res.ok){
-      toast(res.reason === 'not_pending' ? 'Invite expired' : ('Cannot accept: '+(res.reason||'')));
-      return;
+    let room = null;
+    try{
+      const { data, error } = await sb.rpc('accept_duel', { p_room_id: roomId, p_user_id: CURRENT_USER.id });
+      if(!error && data && data.ok) room = data.room;
+      else if(data && !data.ok){
+        toast(data.reason === 'not_pending' ? 'Invite expired' : ('Cannot accept: '+(data.reason||'')));
+        return;
+      }
+    }catch(e){ console.warn('accept rpc', e); }
+    if(!room){
+      // fallback direct update
+      const { data: cur } = await sb.from('duel_rooms').select('*').eq('id', roomId).maybeSingle();
+      if(!cur || cur.status !== 'pending'){ toast('Invite expired'); return; }
+      if(cur.opponent_id !== CURRENT_USER.id){ toast('Not your invite'); return; }
+      const { data: upd, error: ue } = await sb.from('duel_rooms').update({
+        status: 'active', started_at: new Date().toISOString(), updated_at: new Date().toISOString()
+      }).eq('id', roomId).eq('status','pending').select().single();
+      if(ue || !upd){ toast((ue && ue.message) || 'Accept failed'); return; }
+      room = upd;
     }
-    const room = res.room;
-    // mark notif read best-effort
     try{
       await sb.from('notifications').update({ is_read: true })
-        .eq('user_id', CURRENT_USER.id).eq('type','duel_invite').contains('data', { room_id: roomId });
+        .eq('user_id', CURRENT_USER.id).eq('type','duel_invite');
     }catch(e){}
     subscribeDuelRoom(room.id);
     await handleDuelRoomUpdate(room, 'UPDATE');
@@ -7417,14 +7550,21 @@ const _origGoPageDuel = typeof goPage === 'function' ? goPage : null;
 
 // Bind UI
 (function bindDuelUI(){
-  const on = (id, fn)=>{ const e=$(id); if(e && !e._duel){ e._duel=true; e.onclick=fn; } };
-  on('closeDuelCreate', ()=> $('duelCreateModal').classList.add('hidden'));
-  on('duelSendBtn', sendDuelRequest);
-  on('duelAcceptBtn', acceptDuelInvite);
-  on('duelDeclineBtn', declineDuelInvite);
-  on('duelCancelBtn', async ()=>{
-    if(!(await askConfirm('Cancel duel', 'Close and delete this duel room?'))) return;
-    await cancelActiveDuel();
+  // Event delegation — modals may load after script; always works
+  document.addEventListener('click', function(e){
+    const t = e.target && (e.target.id ? e.target : (e.target.closest && e.target.closest('[id]')));
+    if(!t || !t.id) return;
+    if(t.id === 'closeDuelCreate'){ e.preventDefault(); const m=$('duelCreateModal'); if(m) m.classList.add('hidden'); }
+    if(t.id === 'duelSendBtn'){ e.preventDefault(); sendDuelRequest(); }
+    if(t.id === 'duelAcceptBtn'){ e.preventDefault(); acceptDuelInvite(); }
+    if(t.id === 'duelDeclineBtn'){ e.preventDefault(); declineDuelInvite(); }
+    if(t.id === 'duelCancelBtn'){
+      e.preventDefault();
+      (async ()=>{
+        if(!(await askConfirm('Cancel duel', 'Close and delete this duel room?'))) return;
+        await cancelActiveDuel();
+      })();
+    }
   });
 })();
 
@@ -7511,21 +7651,18 @@ const _origGoPageDuel = typeof goPage === 'function' ? goPage : null;
     if(!box){
       box = document.createElement('div');
       box.id = 'duelActionBox';
-      box.style.cssText = 'margin-top:12px;';
-      const modal = $('userModal') || document.querySelector('#userModal .modal-box') || document.querySelector('.modal-box');
-      // try place after modal status area
-      const host = $('modalStatus') && $('modalStatus').parentNode;
-      if(host && host.parentNode) host.parentNode.appendChild(box);
+      box.style.cssText = 'margin-top:14px;padding:0 2px 8px;';
+      const mb = document.querySelector('#userModal .modal-box');
+      if(mb) mb.appendChild(box);
       else {
-        const mb = document.querySelector('#userModal .modal-box');
-        if(mb) mb.appendChild(box);
+        const host = $('modalStatus') && $('modalStatus').parentNode;
+        if(host && host.parentNode) host.parentNode.appendChild(box);
       }
     }
     const self = CURRENT_USER && u && u.id === CURRENT_USER.id;
-    const bothOnline = !self && u && CURRENT_USER && isOnline(u.last_online) && isOnline(CURRENT_USER.last_online);
-    if(self || !bothOnline){
-      box.innerHTML = bothOnline ? '' : (self ? '' : '<div style="font-size:11px;color:var(--text-dim);text-align:center;margin-top:6px;">Duel available when both are online</div>');
-      if(self) box.innerHTML = '';
+    const oppOnline = !self && u && u.last_online && (Date.now() - new Date(u.last_online).getTime()) < 10*60*1000;
+    if(self || !oppOnline){
+      box.innerHTML = self ? '' : '<div style="font-size:11px;color:var(--text-dim);text-align:center;margin-top:6px;">Duel available when opponent is online</div>';
       return;
     }
     box.innerHTML = `<button type="button" class="btn btn-primary" id="challengeDuelBtn" style="margin-top:4px;">⚔️ Challenge to Duel</button>
@@ -7634,34 +7771,6 @@ buildKeypad();
 initModeTabs();
 boot();
 </script>
-
-<!-- Duel create modal -->
-<div class="modal-bg hidden" id="duelCreateModal">
-  <div class="modal-box">
-    <button type="button" class="modal-close" id="closeDuelCreate">✕</button>
-    <h3>⚔️ Challenge to Duel</h3>
-    <p style="text-align:center;color:var(--text-dim);font-size:13px;margin:0 0 10px;">Invite <b id="duelTargetName">user</b> to a live 1v1 race. Same number — first correct guess wins.</p>
-    <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;font-weight:700;">Mode (chosen by you)</div>
-    <div class="duel-mode-select" id="duelModeSelect">
-      <button type="button" data-mode="easy">Easy</button>
-      <button type="button" data-mode="normal" class="active">Normal</button>
-      <button type="button" data-mode="hard">Hard</button>
-      <button type="button" data-mode="extreme">Extreme</button>
-    </div>
-    <button type="button" class="btn btn-primary" id="duelSendBtn" style="margin-top:8px;">Send duel request</button>
-    <div style="font-size:11px;color:var(--text-dim);margin-top:10px;line-height:1.5;text-align:center;">Both players must be online. Opponent gets a live notification to accept or decline.</div>
-  </div>
-</div>
-
-<!-- Duel invite accept modal -->
-<div class="modal-bg hidden" id="duelInviteModal">
-  <div class="modal-box">
-    <h3>⚔️ Duel Request</h3>
-    <p id="duelInviteText" style="text-align:center;color:var(--text);font-size:14px;line-height:1.55;margin:8px 0 16px;"></p>
-    <div class="confirm-actions">
-      <button type="button" class="btn btn-ghost" id="duelDeclineBtn" style="background:var(--bg);color:var(--text);">Decline</button>
-      <button type="button" class="btn btn-primary" id="duelAcceptBtn">Accept</button>
-    </div>
   </div>
 </div>
 </body>
