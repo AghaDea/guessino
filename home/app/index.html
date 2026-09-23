@@ -2153,8 +2153,20 @@ function toast(msg){
   window.__toastTimer = setTimeout(()=>t.classList.remove('show'), 2400);
 }
 async function sha256(str){
-  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
-  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
+  try{
+    if(crypto && crypto.subtle && crypto.subtle.digest){
+      const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+      return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
+    }
+  }catch(e){}
+  // fallback (non-crypto) — only for non-secure contexts
+  let h1=0x811c9dc5, h2=0x811c9dc5;
+  for(let i=0;i<str.length;i++){
+    const c=str.charCodeAt(i);
+    h1 ^= c; h1 = Math.imul(h1, 0x01000193);
+    h2 ^= c; h2 = Math.imul(h2, 0x01000193) ^ (h1>>>16);
+  }
+  return (h1>>>0).toString(16).padStart(8,'0')+(h2>>>0).toString(16).padStart(8,'0')+String(str.length);
 }
 /* ---------- Strong device fingerprint (hard to bypass device ban) ---------- */
 function collectDeviceSignals(){
@@ -2777,60 +2789,98 @@ async function enforceBotServerPunishment(reason){
   showFullBotBanOverlay(GZ_BOT_DEVICE_REASON);
 }
 
+
+async function withTimeout(promise, ms){
+  let timer;
+  try{
+    return await Promise.race([
+      promise,
+      new Promise((_,reject)=>{ timer=setTimeout(()=>reject(new Error('timeout')), ms); })
+    ]);
+  }finally{ try{ clearTimeout(timer); }catch(e){} }
+}
+
 async function boot(){
   showLoading();
-  // never stay on loading forever
-  const forceLeave = setTimeout(()=>{
+  let left = false;
+  const leave = (why)=>{
+    if(left) return;
+    left = true;
+    try{ clearTimeout(forceLeave); }catch(e){}
+    console.warn('boot leave:', why);
     try{
       const ls=$('loadingScreen');
-      if(ls && !ls.classList.contains('hidden')){
-        console.warn('boot timeout → login');
-        gzGoLogin();
-      }
-    }catch(e){ try{ gzGoLogin(); }catch(e2){} }
-  }, 12000);
+      if(ls) ls.classList.add('hidden');
+    }catch(e){}
+    try{ gzGoLogin(); }catch(e){
+      try{ location.replace('../login/'); }catch(e2){}
+    }
+  };
+  // hard escape — never stay on Loading forever (some phones hang on network)
+  const forceLeave = setTimeout(()=> leave('force_timeout'), 6000);
+
   try{
-    await ensureSupabase();
+    // 1) DB client (max ~5s)
+    try{ await withTimeout(ensureSupabase(), 5000); }catch(e){ console.warn('ensure sb', e); }
     if(!sb){
-      clearTimeout(forceLeave);
-      setDbWarning(true, 'Could not connect to database (network or CDN). Pull to refresh and try again.');
-      $('loadingScreen').classList.add('hidden');
-      // still send to login so user is not stuck
-      setTimeout(()=>{ try{ gzGoLogin(); }catch(e){} }, 1500);
+      setDbWarning(true, 'Could not connect to database. Check internet and refresh.');
+      leave('no_sb');
       return;
     }
-    await initDevice();
+
+    // 2) Device id (must not hang — crypto may fail on http)
+    try{ await withTimeout(initDevice(), 1500); }
+    catch(e){
+      console.warn('initDevice', e);
+      try{
+        DEVICE_ID = localStorage.getItem('gz_device_id') || ('tmp_'+Date.now());
+        localStorage.setItem('gz_device_id', DEVICE_ID);
+      }catch(e2){ DEVICE_ID = 'tmp_'+Date.now(); }
+    }
+
+    // 3) Soft bot checks (never block UI long)
     try{
       const localUntil = isLocalBotBanned();
       if(localUntil){
         const r = (function(){ try{ return localStorage.getItem('gz_bot_ban_reason')||'automation'; }catch(e){ return 'automation'; }})();
-        await enforceBotServerPunishment(r);
-        clearTimeout(forceLeave);
-        return;
+        try{ await withTimeout(enforceBotServerPunishment(r), 3000); }catch(e){}
+        left = true; clearTimeout(forceLeave); return;
       }
       const hard = detectHardBotSignals();
       if(hard.length){
-        await enforceBotServerPunishment(hard.join(','));
-        clearTimeout(forceLeave);
-        return;
+        try{ await withTimeout(enforceBotServerPunishment(hard.join(',')), 3000); }catch(e){}
+        left = true; clearTimeout(forceLeave); return;
       }
-    }catch(e){ console.warn('bot enforce boot', e); }
-    const devBan = await getActiveDeviceBan();
-    if(devBan){ showDeviceBanScreen(devBan); clearTimeout(forceLeave); return; }
+    }catch(e){ console.warn('bot boot', e); }
+
+    // 4) Device ban (short timeout)
+    try{
+      const devBan = await withTimeout(getActiveDeviceBan(), 2500);
+      if(devBan){ showDeviceBanScreen(devBan); left=true; clearTimeout(forceLeave); return; }
+    }catch(e){ console.warn('devban skip', e); }
+
+    // 5) Saved session
     const savedId = localStorage.getItem('gz_user_id');
     if(savedId){
       try{
-        const { data: user, error } = await sb.from('users').select('*').eq('id', savedId).maybeSingle();
-        if(!error && user){ await enterSession(user, { fromSaved: true }); clearTimeout(forceLeave); return; }
+        const result = await withTimeout(
+          sb.from('users').select('*').eq('id', savedId).maybeSingle(),
+          4000
+        );
+        if(result && !result.error && result.data){
+          await enterSession(result.data, { fromSaved: true });
+          left = true;
+          clearTimeout(forceLeave);
+          return;
+        }
       }catch(e){ console.warn('session load', e); }
-      localStorage.removeItem('gz_user_id');
+      try{ localStorage.removeItem('gz_user_id'); }catch(e){}
     }
-    clearTimeout(forceLeave);
-    gzGoLogin();
+
+    leave('no_session');
   }catch(e){
-    console.error(e);
-    clearTimeout(forceLeave);
-    gzGoLogin();
+    console.error('boot', e);
+    leave('error');
   }
 }
 
@@ -2993,58 +3043,61 @@ async function enterSession(user, opts){
   if(opts.fromSaved && await checkDeviceRevoked(user.id)) return;
 
   CURRENT_USER = user;
-  await sb.from('users').update({ last_online: new Date().toISOString(), device_id: DEVICE_ID }).eq('id', user.id);
-  await registerCurrentDevice(user.id);
-  // Auto weekly reset when a new ISO week starts (only weekly stats)
-  try{ await ensureWeeklyReset(); }catch(e){ console.warn('weekly', e); }
-  // reload user in case weekly fields were zeroed
-  try{
-    const { data: freshU } = await sb.from('users').select('*').eq('id', user.id).maybeSingle();
-    if(freshU) user = freshU;
-  }catch(e){}
-  CURRENT_USER = user;
 
+  // Show app UI immediately — never keep user on Loading
   hideAllScreens();
-  $('mainApp').classList.remove('hidden');
-  $('topbarUser').textContent = '@' + user.username;
-  $('navAdmin').classList.toggle('hidden', !(user.is_owner || user.is_admin));
-  try{ await loadMyClan(true); }catch(e){}
-  refreshGameUI();
-  startNewRound();
-  goPage('game');
-  // Live account updates (ban / verify / admin / kick) + chat realtime
-  ensureUserRealtime();
-  ensureChatRealtime();
-  ensureChatFallbackPolling();
-  ensureNotifRealtime();
-  bindNotifUI();
-  try{ refreshNotifBadge(); }catch(e){}
-  loadUnreadCounts().catch(()=>{});
-  try{ refreshClanProfileUI(); }catch(e){}
-  try{ refreshNotifBadge(); }catch(e){}
-  // When tab becomes visible again, re-sync immediately
+  try{ $('mainApp').classList.remove('hidden'); }catch(e){}
+  try{ $('topbarUser').textContent = '@' + user.username; }catch(e){}
+  try{ $('navAdmin').classList.toggle('hidden', !(user.is_owner || user.is_admin)); }catch(e){}
+  try{ refreshGameUI(); }catch(e){}
+  try{ startNewRound(); }catch(e){}
+  try{ goPage('game'); }catch(e){}
+
+  // Background session tasks (do not block first paint)
+  (async ()=>{
+    try{
+      await Promise.race([
+        (async()=>{
+          try{ await sb.from('users').update({ last_online: new Date().toISOString(), device_id: DEVICE_ID }).eq('id', user.id); }catch(e){}
+          try{ await registerCurrentDevice(user.id); }catch(e){}
+          try{ await ensureWeeklyReset(); }catch(e){}
+          try{
+            const { data: freshU } = await sb.from('users').select('*').eq('id', user.id).maybeSingle();
+            if(freshU){ CURRENT_USER = freshU; try{ refreshGameUI(); }catch(e){} }
+          }catch(e){}
+        })(),
+        new Promise(r=>setTimeout(r, 5000))
+      ]);
+    }catch(e){}
+    try{ await loadMyClan(true); }catch(e){}
+    try{ ensureUserRealtime(); }catch(e){}
+    try{ ensureChatRealtime(); }catch(e){}
+    try{ ensureChatFallbackPolling(); }catch(e){}
+    try{ ensureNotifRealtime(); }catch(e){}
+    try{ bindNotifUI(); }catch(e){}
+    try{ refreshNotifBadge(); }catch(e){}
+    try{ loadUnreadCounts(); }catch(e){}
+    try{ refreshClanProfileUI(); }catch(e){}
+    try{ refreshSupportBadge(); }catch(e){}
+    try{ loadAnnouncement(); }catch(e){}
+  })();
+
   if(!window.__visBound){
     window.__visBound = true;
     document.addEventListener('visibilitychange', ()=>{
       if(document.visibilityState === 'visible' && CURRENT_USER){
-        syncCurrentUserFromServer();
-        ensureChatRealtime();
-        ensureChatFallbackPolling();
-        loadUnreadCounts().catch(()=>{});
+        try{ syncCurrentUserFromServer(); }catch(e){}
+        try{ ensureChatRealtime(); }catch(e){}
+        try{ ensureChatFallbackPolling(); }catch(e){}
+        try{ loadUnreadCounts(); }catch(e){}
       }
     });
   }
-  refreshSupportBadge();
-  loadAnnouncement();
-  // keep last_online fresh while app is open
   if(window.__onlineTimer) clearInterval(window.__onlineTimer);
   window.__onlineTimer = setInterval(async ()=>{
     if(!CURRENT_USER) return;
-    try{
-      await sb.from('users').update({ last_online: new Date().toISOString() }).eq('id', CURRENT_USER.id);
-    }catch(e){}
-    // Backup sync if realtime is delayed / not enabled
-    await syncCurrentUserFromServer();
+    try{ await sb.from('users').update({ last_online: new Date().toISOString() }).eq('id', CURRENT_USER.id); }catch(e){}
+    try{ await syncCurrentUserFromServer(); }catch(e){}
   }, 15000);
 }
 
@@ -8136,9 +8189,12 @@ async function recoverActiveDuel(){
   }, 500);
 })();
 
-buildKeypad();
-initModeTabs();
-boot();
+try{ buildKeypad(); }catch(e){ console.warn(e); }
+try{ initModeTabs(); }catch(e){ console.warn(e); }
+try{ boot(); }catch(e){
+  console.error('boot call', e);
+  try{ gzGoLogin(); }catch(e2){ try{ location.replace('../login/'); }catch(e3){} }
+}
 </script>
   </div>
 </div>
