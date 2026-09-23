@@ -421,7 +421,7 @@ function nowTehranLabel(){
 function escapeHtml(s){ return (s||'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function isOnline(last){
   if(!last) return false;
-  return (Date.now() - new Date(last).getTime()) < 5*60*1000;
+  return (Date.now() - new Date(last).getTime()) < 3*60*1000; // 3 min presence window
 }
 function levelTitle(level){
   level = Number(level)||1;
@@ -537,7 +537,6 @@ const ACHIEVEMENTS = [
 ];
 
 const RATE = { ticketMs:60000, chatMs:1200, reportMs:30000, lastTicket:0, lastChat:0, lastReport:0 };
-
 
 /** ---- Owner + granular staff permissions ---- */
 const PERM_KEYS = [
@@ -758,8 +757,6 @@ async function ensureWeeklyReset(){
   return res;
 }
 
-
-
 function askConfirm(title, msg){
   return new Promise(resolve=>{
     $('confirmTitle').textContent = title || 'Confirm';
@@ -884,7 +881,6 @@ async function enforceBotServerPunishment(reason){
   CURRENT_USER = null;
   showFullBotBanOverlay(GZ_BOT_DEVICE_REASON);
 }
-
 
 async function withTimeout(promise, ms){
   let timer;
@@ -1098,7 +1094,6 @@ function showUserBanScreen(user){
 function inlineLoadingHtml(text){
   return `<div class="inline-loading">${text||'Loading'}<span class="dot">.</span><span class="dot">.</span><span class="dot">.</span></div>`;
 }
-
 
 /* ---- Auto-expire bans (Tehran/server now) ---- */
 async function expireExpiredBans(){
@@ -1343,11 +1338,11 @@ async function enterSession(user, opts){
     if(!CURRENT_USER) return;
     try{ await sb.from('users').update({ last_online: new Date().toISOString() }).eq('id', CURRENT_USER.id); }catch(e){}
     try{ await expireExpiredBans(); }catch(e){}
+    try{ if(sb) await sb.rpc('cleanup_stale_duels', { p_pending_minutes: 30, p_active_minutes: 25 }); }catch(e){}
     try{ await syncCurrentUserFromServer(); }catch(e){}
   }, 15000);
   try{ expireExpiredBans(); }catch(e){}
 }
-
 
 function dedupeDevicesById(rows){
   if(!rows || !rows.length) return [];
@@ -1434,7 +1429,6 @@ async function checkDeviceRevoked(userId){
     return true;
   }catch(e){ return false; }
 }
-
 
 /** First device that joined this account (oldest first_seen) owns kick rights */
 async function getOwnerDeviceId(userId){
@@ -1677,6 +1671,7 @@ function initModeTabs(){
 }
 
 async function submitGuess(){
+  if(window._duelUiLocked) return;
   if(window.__guessBusy) return;
   if(!typedDigits){ toast('Enter a number'); return; }
   const mode = GAME_MODES[gameMode] || GAME_MODES.normal;
@@ -1685,32 +1680,35 @@ async function submitGuess(){
     toast('Number must be between '+mode.min.toLocaleString()+' and '+mode.max.toLocaleString());
     return;
   }
+  const target = (typeof isDuelPlaying === 'function' && isDuelPlaying() && ACTIVE_DUEL)
+    ? Number(ACTIVE_DUEL.target) : currentTarget;
   currentGuessCount++;
-  $('statThisGuesses').textContent = currentGuessCount;
+  if($('statThisGuesses')) $('statThisGuesses').textContent = currentGuessCount;
   const rl = $('resultLabel');
-  rl.classList.add('show');
+  if(rl) rl.classList.add('show');
 
-  if(guess === currentTarget){
-    rl.className = 'result-label show win';
-    rl.textContent = 'You Win! '+currentTarget.toLocaleString('en-US');
-    $('guessDisplay').classList.add('win-flash');
+  if(guess === target){
+    if(rl){ rl.className = 'result-label show win'; rl.textContent = 'You Win! '+target.toLocaleString('en-US'); }
+    if($('guessDisplay')) $('guessDisplay').classList.add('win-flash');
     guessHistory.push({guess, result:'Win'});
     renderGuessHistory();
     typedDigits = '';
     renderTypedDigits();
+    if(typeof isDuelPlaying === 'function' && isDuelPlaying()){
+      await claimDuelWinIfNeeded(currentGuessCount);
+      return;
+    }
     window.__guessBusy = true;
     try{ await registerWin(currentGuessCount, gameMode); }
     finally{ setTimeout(()=>{ startNewRound(); window.__guessBusy = false; }, 1700); }
-  } else if(guess < currentTarget){
-    rl.className = 'result-label show higher';
-    rl.textContent = '↑ Higher';
+  } else if(guess < target){
+    if(rl){ rl.className = 'result-label show higher'; rl.textContent = '↑ Higher'; }
     guessHistory.push({guess, result:'↑ Higher'});
     renderGuessHistory();
     typedDigits = '';
     renderTypedDigits();
   } else {
-    rl.className = 'result-label show lower';
-    rl.textContent = '↓ Lower';
+    if(rl){ rl.className = 'result-label show lower'; rl.textContent = '↓ Lower'; }
     guessHistory.push({guess, result:'↓ Lower'});
     renderGuessHistory();
     typedDigits = '';
@@ -1864,7 +1862,6 @@ function setLbTabs(){
 let lbSearchTimer = null;
 $('lbSearch').oninput = ()=>{ clearTimeout(lbSearchTimer); lbSearchTimer = setTimeout(()=> loadLeaderboard(), 280); };
 
-
 async function loadClansPage(){
   const list = $('clansPageList');
   if(!list) return;
@@ -1937,11 +1934,11 @@ async function loadLeaderboard(){
 
   let query;
   if(lbMode === 'global'){
-    query = sb.from('users').select('*').order('total_wins',{ascending:false}).order('total_guesses',{ascending:true}).limit(100);
+    query = sb.from('users').select('id,username,avatar_url,xp,level,level_xp,level_xp_needed,total_wins,total_guesses,weekly_wins,weekly_guesses,best_streak,current_streak,crowns,tik,is_admin,is_owner,last_online,banned,ban_type,achievements,display_badges,duel_wins,duel_losses,mode_stats').order('total_wins',{ascending:false}).order('total_guesses',{ascending:true}).limit(100);
   } else if(lbMode === 'weekly'){
-    query = sb.from('users').select('*').gt('weekly_wins',0).order('weekly_wins',{ascending:false}).order('weekly_guesses',{ascending:true}).limit(100);
+    query = sb.from('users').select('id,username,avatar_url,xp,level,level_xp,level_xp_needed,total_wins,total_guesses,weekly_wins,weekly_guesses,best_streak,current_streak,crowns,tik,is_admin,is_owner,last_online,banned,ban_type,achievements,display_badges,duel_wins,duel_losses,mode_stats').gt('weekly_wins',0).order('weekly_wins',{ascending:false}).order('weekly_guesses',{ascending:true}).limit(100);
   } else {
-    query = sb.from('users').select('*').gt('best_streak',0).order('best_streak',{ascending:false}).order('total_wins',{ascending:false}).limit(100);
+    query = sb.from('users').select('id,username,avatar_url,xp,level,level_xp,level_xp_needed,total_wins,total_guesses,weekly_wins,weekly_guesses,best_streak,current_streak,crowns,tik,is_admin,is_owner,last_online,banned,ban_type,achievements,display_badges,duel_wins,duel_losses,mode_stats').gt('best_streak',0).order('best_streak',{ascending:false}).order('total_wins',{ascending:false}).limit(100);
   }
   if(search) query = query.ilike('username', `%${search}%`);
   const { data: rows, error } = await query;
@@ -2065,7 +2062,6 @@ async function openUserModal(u){
       </div>`
     ).join('');
   })();
-
 
   const showAdmin = canModerateUser(u) && (hasPerm('ban') || hasPerm('verify') || hasPerm('manage_staff'));
   const viewingProtectedAdmin = isStaff() && isProtectedTarget(u) && CURRENT_USER.id !== u.id;
@@ -2550,7 +2546,7 @@ async function loadChatUsers(){
   list.innerHTML = inlineLoadingHtml('Loading users');
   await loadUnreadCounts();
   const search = $('chatSearch').value.trim();
-  let query = sb.from('users').select('*').neq('id', CURRENT_USER.id).order('last_online',{ascending:false}).limit(200);
+  let query = sb.from('users').select('id,username,avatar_url,xp,level,level_xp,level_xp_needed,total_wins,total_guesses,weekly_wins,weekly_guesses,best_streak,current_streak,crowns,tik,is_admin,is_owner,last_online,banned,ban_type,achievements,display_badges,duel_wins,duel_losses,mode_stats').neq('id', CURRENT_USER.id).order('last_online',{ascending:false}).limit(200);
   if(search) query = query.ilike('username', `%${search}%`);
   const { data: rows, error } = await query;
   list.innerHTML = '';
@@ -2575,7 +2571,6 @@ async function loadChatUsers(){
     renderAvatar(row.querySelector(`#chatAv${idx}`), u);
   });
 }
-
 
 async function applyLiveUserUpdate(row){
   if(!row || !CURRENT_USER || row.id !== CURRENT_USER.id) return;
@@ -2693,7 +2688,6 @@ function ensureUserRealtime(){
     });
   userRealtimeSubscribed = true;
 }
-
 
 function ensureChatRealtime(){
   if(!sb || !CURRENT_USER) return;
@@ -3353,7 +3347,7 @@ async function loadAdminDash(){
   }catch(e){}
   const list = $('adminRecentUsers');
   list.innerHTML = inlineLoadingHtml('Loading');
-  const { data: recent } = await sb.from('users').select('*').order('last_online',{ascending:false}).limit(40);
+  const { data: recent } = await sb.from('users').select('id,username,avatar_url,xp,level,level_xp,level_xp_needed,total_wins,total_guesses,weekly_wins,weekly_guesses,best_streak,current_streak,crowns,tik,is_admin,is_owner,last_online,banned,ban_type,achievements,display_badges,duel_wins,duel_losses,mode_stats').order('last_online',{ascending:false}).limit(40);
   list.innerHTML = '';
   (recent||[]).forEach((u,idx)=>{
     const row = document.createElement('div');
@@ -3435,7 +3429,6 @@ async function loadAnnouncement(){
     } else banner.classList.add('hidden');
   }catch(e){ banner.classList.add('hidden'); }
 }
-
 
 /* ---------- THEME (dark / light) ---------- */
 function getSavedTheme(){
@@ -3584,7 +3577,6 @@ function formatClanHistoryRow(h){
   };
   return map[h.action] || (who+' · '+h.action);
 }
-
 
 function canCreateClan(u){
   u = u || CURRENT_USER;
@@ -4231,7 +4223,6 @@ setTimeout(()=>{
 
 /* Enrich leaderboard / chat / modal with clan tags */
 const _origRefreshGameUI = typeof refreshGameUI === 'function' ? refreshGameUI : null;
-
 
 /* ---------- NOTIFICATIONS ---------- */
 let notifLoaded = false;
@@ -4915,7 +4906,6 @@ async function openClanPublicDetail(clan){
   };
 }
 
-
 function ensureNotifRealtime(){
   if(!sb || !CURRENT_USER) return;
   const uid = CURRENT_USER.id;
@@ -5031,7 +5021,6 @@ function ensureNotifRealtime(){
     try{ refreshNotifBadge(); }catch(e){}
   }, 12000);
 }
-
 
 function bindNotifUI(){
 
@@ -6010,7 +5999,6 @@ function subscribeDuelRoom(roomId){
   }catch(e){ console.warn('duel rt', e); startDuelWatch(); }
 }
 
-
 function startDuelWatch(){
   try{ if(_duelWatchTimer) clearInterval(_duelWatchTimer); }catch(e){}
   window.__duelOfflineStrikes = 0;
@@ -6344,7 +6332,7 @@ async function acceptDuelInvite(){
       if(!cur || cur.status !== 'pending'){ toast('Invite expired'); return; }
       if(cur.opponent_id !== CURRENT_USER.id){ toast('Not your invite'); return; }
       const { data: upd, error: ue } = await sb.from('duel_rooms').update({
-        status: 'active', started_at: new Date().toISOString(), updated_at: new Date().toISOString()
+        status: 'active', started_at: new Date().toISOString(), accepted_at: new Date().toISOString(), updated_at: new Date().toISOString()
       }).eq('id', roomId).eq('status','pending').select().single();
       if(ue || !upd){ toast((ue && ue.message) || 'Accept failed'); return; }
       room = upd;
@@ -6385,17 +6373,39 @@ async function declineDuelInvite(){
   _pendingDuelInviteRoomId = null;
 }
 
-// Hook: leave page / unload cancels active duel
-window.addEventListener('beforeunload', ()=>{
-  if(ACTIVE_DUEL && CURRENT_USER && (ACTIVE_DUEL.status==='active' || ACTIVE_DUEL.status==='pending')){
-    try{
-      // best-effort; may not always complete
-      const url = (window.__SUPABASE_URL||'') + '/rest/v1/rpc/cancel_duel';
-      // use sendBeacon-friendly path via supabase is hard; fire and forget fetch
-      navigator.sendBeacon && fetch; // no-op keep
-    }catch(e){}
-  }
-});
+// Best-effort cancel duel when tab closes
+function beaconCancelDuel(){
+  try{
+    if(!ACTIVE_DUEL || !CURRENT_USER) return;
+    if(ACTIVE_DUEL.status !== 'active' && ACTIVE_DUEL.status !== 'pending') return;
+    const roomId = ACTIVE_DUEL.id;
+    const uid = CURRENT_USER.id;
+    const base = (typeof SUPABASE_URL !== 'undefined' ? SUPABASE_URL : '') || '';
+    const key = (typeof SUPABASE_ANON_KEY !== 'undefined' ? SUPABASE_ANON_KEY : '') || '';
+    if(!base || !key || !roomId) return;
+    const body = JSON.stringify({ p_room_id: roomId, p_user_id: uid });
+    const url = base + '/rest/v1/rpc/cancel_duel';
+    if(navigator.sendBeacon){
+      try{
+        const blob = new Blob([body], { type: 'application/json' });
+        // sendBeacon cannot set headers reliably; use fetch keepalive
+      }catch(e){}
+    }
+    fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'apikey': key,
+        'Authorization': 'Bearer ' + key,
+        'Prefer': 'return=minimal'
+      },
+      body,
+      keepalive: true
+    }).catch(()=>{});
+  }catch(e){}
+}
+window.addEventListener('pagehide', beaconCancelDuel);
+window.addEventListener('beforeunload', beaconCancelDuel);
 // Prefer visibility + explicit cancel button; also cancel when leaving game page while active
 const _origGoPageDuel = typeof goPage === 'function' ? goPage : null;
 
@@ -6417,57 +6427,6 @@ const _origGoPageDuel = typeof goPage === 'function' ? goPage : null;
       })();
     }
   });
-})();
-
-// Patch submitGuess for duel
-(function patchSubmitGuessForDuel(){
-  const orig = submitGuess;
-  if(typeof orig !== 'function') return;
-  window.submitGuess = async function(){
-    if(_duelUiLocked) return;
-    if(window.__guessBusy) return;
-    if(!typedDigits){ toast('Enter a number'); return; }
-    const mode = GAME_MODES[gameMode] || GAME_MODES.normal;
-    const guess = Number(typedDigits);
-    if(!Number.isFinite(guess) || guess < mode.min || guess > mode.max){
-      toast('Number must be between '+mode.min.toLocaleString()+' and '+mode.max.toLocaleString());
-      return;
-    }
-    // In duel: use room target, never local random
-    const target = isDuelPlaying() ? Number(ACTIVE_DUEL.target) : currentTarget;
-    currentGuessCount++;
-    if($('statThisGuesses')) $('statThisGuesses').textContent = currentGuessCount;
-    const rl = $('resultLabel');
-    if(rl) rl.classList.add('show');
-
-    if(guess === target){
-      if(rl){ rl.className = 'result-label show win'; rl.textContent = 'You Win! '+target.toLocaleString('en-US'); }
-      if($('guessDisplay')) $('guessDisplay').classList.add('win-flash');
-      guessHistory.push({guess, result:'Win'});
-      renderGuessHistory();
-      typedDigits = '';
-      renderTypedDigits();
-      if(isDuelPlaying()){
-        await claimDuelWinIfNeeded(currentGuessCount);
-        return;
-      }
-      window.__guessBusy = true;
-      try{ await registerWin(currentGuessCount, gameMode); }
-      finally{ setTimeout(()=>{ startNewRound(); window.__guessBusy = false; }, 1700); }
-    } else if(guess < target){
-      if(rl){ rl.className = 'result-label show higher'; rl.textContent = '↑ Higher'; }
-      guessHistory.push({guess, result:'↑ Higher'});
-      renderGuessHistory();
-      typedDigits = '';
-      renderTypedDigits();
-    } else {
-      if(rl){ rl.className = 'result-label show lower'; rl.textContent = '↓ Lower'; }
-      guessHistory.push({guess, result:'↓ Lower'});
-      renderGuessHistory();
-      typedDigits = '';
-      renderTypedDigits();
-    }
-  };
 })();
 
 // Patch startNewRound to not randomize while duel active
