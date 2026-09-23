@@ -1452,8 +1452,13 @@ html:not([data-theme="light"]) .modal-bg{background:rgba(0,0,0,.78);}
 <div id="app">
   <div id="loadingScreen" class="loading-wrap">
     <div class="auth-logo" style="margin-bottom:4px;">Guess<span>ino</span></div>
-    <div class="spinner"></div>
-    <div class="loading-text">Loading...</div>
+    <div class="spinner" id="loadingSpinner"></div>
+    <div class="loading-text" id="loadingText">Loading...</div>
+    <div id="loadingError" class="hidden" style="max-width:320px;margin-top:14px;text-align:center;padding:0 16px;">
+      <div id="loadingErrorMsg" style="font-size:13px;color:var(--red,#f4212e);line-height:1.5;margin-bottom:12px;"></div>
+      <button type="button" class="btn btn-primary" id="loadingRetryBtn" style="width:auto;min-width:140px;padding:10px 18px;">Retry</button>
+      <button type="button" class="btn btn-ghost" id="loadingGoLoginBtn" style="width:auto;min-width:140px;padding:10px 18px;margin-top:8px;">Back to Login</button>
+    </div>
   </div>
 
   <div id="setupWarning" class="setup-warning hidden">
@@ -2829,42 +2834,69 @@ async function withTimeout(promise, ms){
   }finally{ try{ clearTimeout(timer); }catch(e){} }
 }
 
+function setLoadingStatus(text, isError){
+  try{
+    const t = $('loadingText');
+    if(t) t.textContent = text || 'Loading...';
+    const sp = $('loadingSpinner');
+    if(sp) sp.style.display = isError ? 'none' : '';
+    const er = $('loadingError');
+    if(er) er.classList.toggle('hidden', !isError);
+  }catch(e){}
+}
+function showBootError(msg, opts){
+  opts = opts || {};
+  try{ clearTimeout(window.__bootForceTimer); }catch(e){}
+  setLoadingStatus('Something went wrong', true);
+  const m = $('loadingErrorMsg');
+  if(m) m.textContent = msg || 'Could not open the app. Check your connection and try again.';
+  const retry = $('loadingRetryBtn');
+  const goLogin = $('loadingGoLoginBtn');
+  if(retry){
+    retry.onclick = ()=>{
+      setLoadingStatus('Loading...', false);
+      if(goLogin) goLogin.classList.add('hidden');
+      boot();
+    };
+    retry.classList.remove('hidden');
+  }
+  if(goLogin){
+    goLogin.classList.toggle('hidden', !opts.allowLogin);
+    goLogin.onclick = ()=>{
+      try{ localStorage.removeItem('gz_user_id'); }catch(e){}
+      try{ gzGoLogin(); }catch(e){ try{ location.replace('../login/'); }catch(e2){} }
+    };
+  }
+}
+
 async function boot(){
   showLoading();
-  let left = false;
-  const leave = (why)=>{
-    if(left) return;
-    // Never bounce to login if we already entered the app
-    if(CURRENT_USER) return;
+  setLoadingStatus('Loading...', false);
+  let finished = false;
+  // Do NOT auto-redirect to login on timeout — show error + Retry instead
+  try{ clearTimeout(window.__bootForceTimer); }catch(e){}
+  window.__bootForceTimer = setTimeout(()=>{
+    if(finished || CURRENT_USER) return;
     try{
       const main = $('mainApp');
       if(main && !main.classList.contains('hidden')) return;
     }catch(e){}
-    left = true;
-    try{ clearTimeout(forceLeave); }catch(e){}
-    console.warn('boot leave:', why);
-    try{
-      const ls=$('loadingScreen');
-      if(ls) ls.classList.add('hidden');
-    }catch(e){}
-    try{ gzGoLogin(); }catch(e){
-      try{ location.replace('../login/'); }catch(e2){}
-    }
-  };
-  // Only as last resort — network can be slow after login
-  const forceLeave = setTimeout(()=> leave('force_timeout'), 18000);
+    showBootError('Connection is taking too long. Tap Retry to try again.', { allowLogin: true });
+  }, 25000);
 
   try{
-    // 1) DB client (max ~5s)
-    try{ await withTimeout(ensureSupabase(), 5000); }catch(e){ console.warn('ensure sb', e); }
+    // 1) DB client
+    setLoadingStatus('Connecting...', false);
+    try{ await withTimeout(ensureSupabase(), 8000); }catch(e){ console.warn('ensure sb', e); }
     if(!sb){
-      setDbWarning(true, 'Could not connect to database. Check internet and refresh.');
-      leave('no_sb');
+      finished = true;
+      showBootError('Database is not available. Check internet / CDN and tap Retry.', { allowLogin: true });
       return;
     }
 
-    // 2) Device id (must not hang — crypto may fail on http)
-    try{ await withTimeout(initDevice(), 1500); }
+    // 2) Device id
+    setLoadingStatus('Preparing device...', false);
+    try{ await withTimeout(initDevice(), 2000); }
     catch(e){
       console.warn('initDevice', e);
       try{
@@ -2873,49 +2905,110 @@ async function boot(){
       }catch(e2){ DEVICE_ID = 'tmp_'+Date.now(); }
     }
 
-    // 3) Soft bot checks (never block UI long)
+    // 3) Soft bot checks (UNCHANGED logic — only wrapped so boot can continue)
     try{
       const localUntil = isLocalBotBanned();
       if(localUntil){
         const r = (function(){ try{ return localStorage.getItem('gz_bot_ban_reason')||'automation'; }catch(e){ return 'automation'; }})();
         try{ await withTimeout(enforceBotServerPunishment(r), 3000); }catch(e){}
-        left = true; clearTimeout(forceLeave); return;
+        finished = true;
+        try{ clearTimeout(window.__bootForceTimer); }catch(e){}
+        return;
       }
       const hard = detectHardBotSignals();
       if(hard.length){
         try{ await withTimeout(enforceBotServerPunishment(hard.join(',')), 3000); }catch(e){}
-        left = true; clearTimeout(forceLeave); return;
+        finished = true;
+        try{ clearTimeout(window.__bootForceTimer); }catch(e){}
+        return;
       }
     }catch(e){ console.warn('bot boot', e); }
 
-    // 4) Device ban (short timeout)
+    // 4) Device ban
     try{
-      const devBan = await withTimeout(getActiveDeviceBan(), 2500);
-      if(devBan){ showDeviceBanScreen(devBan); left=true; clearTimeout(forceLeave); return; }
+      const devBan = await withTimeout(getActiveDeviceBan(), 3000);
+      if(devBan){
+        finished = true;
+        try{ clearTimeout(window.__bootForceTimer); }catch(e){}
+        showDeviceBanScreen(devBan);
+        return;
+      }
     }catch(e){ console.warn('devban skip', e); }
 
-    // 5) Saved session
+    // 5) Saved session — retry; never wipe session on network timeout
     const savedId = localStorage.getItem('gz_user_id');
     if(savedId){
-      try{
-        const result = await withTimeout(
-          sb.from('users').select('*').eq('id', savedId).maybeSingle(),
-          4000
-        );
-        if(result && !result.error && result.data){
-          left = true;
-          try{ clearTimeout(forceLeave); }catch(e){}
-          await enterSession(result.data, { fromSaved: true });
-          return;
+      setLoadingStatus('Signing you in...', false);
+      let lastErr = null;
+      let user = null;
+      for(let attempt = 0; attempt < 3; attempt++){
+        try{
+          const result = await withTimeout(
+            sb.from('users').select('*').eq('id', savedId).maybeSingle(),
+            8000
+          );
+          if(result && result.error){
+            lastErr = result.error;
+            // invalid id format etc.
+            const code = String(result.error.code || '');
+            const msg = String(result.error.message || '').toLowerCase();
+            if(code === '22P02' || msg.includes('invalid input syntax')){
+              // bad stored id — clear and go login
+              try{ localStorage.removeItem('gz_user_id'); }catch(e){}
+              finished = true;
+              try{ clearTimeout(window.__bootForceTimer); }catch(e){}
+              showBootError('Saved session is invalid. Please log in again.', { allowLogin: true });
+              return;
+            }
+            // network-ish → retry
+            await new Promise(r=>setTimeout(r, 600 * (attempt+1)));
+            continue;
+          }
+          if(result && result.data){
+            user = result.data;
+            break;
+          }
+          // no row = account deleted / wrong id
+          if(result && !result.data && !result.error){
+            try{ localStorage.removeItem('gz_user_id'); }catch(e){}
+            finished = true;
+            try{ clearTimeout(window.__bootForceTimer); }catch(e){}
+            showBootError('Account not found. Please log in again.', { allowLogin: true });
+            return;
+          }
+        }catch(e){
+          lastErr = e;
+          console.warn('session load attempt', attempt, e);
+          await new Promise(r=>setTimeout(r, 600 * (attempt+1)));
         }
-      }catch(e){ console.warn('session load', e); }
-      try{ localStorage.removeItem('gz_user_id'); }catch(e){}
+      }
+      if(user){
+        finished = true;
+        try{ clearTimeout(window.__bootForceTimer); }catch(e){}
+        try{
+          await enterSession(user, { fromSaved: true });
+        }catch(e){
+          console.error('enterSession', e);
+          // keep session — show retry, do NOT bounce to login
+          showBootError('Could not finish loading your account. Tap Retry.', { allowLogin: true });
+        }
+        return;
+      }
+      // still no user after retries — network failure, KEEP gz_user_id
+      finished = true;
+      const detail = (lastErr && (lastErr.message || String(lastErr))) || 'timeout';
+      showBootError('Could not reach the server (' + String(detail).slice(0,80) + '). Tap Retry — your session was kept.', { allowLogin: true });
+      return;
     }
 
-    leave('no_session');
+    // No saved session → login (expected)
+    finished = true;
+    try{ clearTimeout(window.__bootForceTimer); }catch(e){}
+    try{ gzGoLogin(); }catch(e){ try{ location.replace('../login/'); }catch(e2){} }
   }catch(e){
     console.error('boot', e);
-    leave('error');
+    finished = true;
+    showBootError('Unexpected error: ' + (e && e.message ? e.message : 'unknown') + '. Tap Retry.', { allowLogin: true });
   }
 }
 
@@ -3267,9 +3360,9 @@ async function registerCurrentDevice(userId){
 async function checkDeviceRevoked(userId){
   if(!DEVICE_ID || !userId || !sb) return false;
   try{
-    const { data: rows } = await sb.from('devices').select('id,revoked').eq('device_id', DEVICE_ID).eq('user_id', userId);
+    const { data: rows, error } = await sb.from('devices').select('id,revoked').eq('device_id', DEVICE_ID).eq('user_id', userId);
+    if(error) return false; // network/RLS error → do not force logout
     if(!rows || !rows.length) return false; // no row yet — register will create
-    // if ANY non-revoked row exists for this device, allow
     if(rows.some(r => !r.revoked)) return false;
     // all revoked → kicked
     localStorage.removeItem('gz_user_id');
@@ -3277,8 +3370,7 @@ async function checkDeviceRevoked(userId){
     toast('This device was removed from the account');
     gzGoLogin();
     return true;
-  }catch(e){}
-  return false;
+  }catch(e){ return false; }
 }
 
 
