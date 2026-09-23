@@ -1784,7 +1784,7 @@ async function registerWin(guesses, modeKey){
   try{
     await loadMyClan(false);
     if(MY_CLAN && MY_CLAN.clan && MY_CLAN.clan.id){
-      const clanXp = Math.max(5, Math.floor(xpGained * 0.5));
+      const clanXp = Math.max(1, Math.floor(xpGained)); // full user XP goes to clan
       const { data: cRes } = await sb.rpc('add_clan_xp', {
         p_clan_id: MY_CLAN.clan.id,
         p_xp: clanXp,
