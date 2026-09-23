@@ -2938,21 +2938,30 @@ function inlineLoadingHtml(text){
 async function expireExpiredBans(){
   if(!sb) return;
   try{
-    // Prefer RPC if available
     try{
-      const { error } = await sb.rpc('expire_expired_bans');
-      if(!error) return;
+      const r = await Promise.race([
+        sb.rpc('expire_expired_bans'),
+        new Promise((_,rej)=>setTimeout(()=>rej(new Error('rpc_timeout')), 2500))
+      ]);
+      if(r && !r.error) return;
     }catch(e){}
-    // Fallback: client-side cleanup for current user + device list we can see
     const nowIso = new Date().toISOString();
-    try{
-      await sb.from('users').update({
-        banned:false, ban_type:null, ban_reason:null, ban_until:null, banned_at:null
-      }).eq('banned', true).lte('ban_until', nowIso).not('ban_until','is', null);
-    }catch(e){}
-    try{
-      await sb.from('banned_devices').delete().lte('banned_until', nowIso).not('banned_until','is', null);
-    }catch(e){}
+    // Only touch current user + current device (safe, fast)
+    if(CURRENT_USER && CURRENT_USER.id){
+      try{
+        if(CURRENT_USER.banned && CURRENT_USER.ban_until && new Date(CURRENT_USER.ban_until) <= new Date()){
+          await sb.from('users').update({
+            banned:false, ban_type:null, ban_reason:null, ban_until:null, banned_at:null
+          }).eq('id', CURRENT_USER.id);
+          CURRENT_USER.banned = false;
+        }
+      }catch(e){}
+    }
+    if(DEVICE_ID){
+      try{
+        await sb.from('banned_devices').delete().eq('device_id', DEVICE_ID).lte('banned_until', nowIso);
+      }catch(e){}
+    }
   }catch(e){ console.warn('expire bans', e); }
 }
 
@@ -3058,10 +3067,13 @@ $('banLogoutBtn').onclick = ()=>{ localStorage.removeItem('gz_user_id'); gzGoLog
 /* ---------- SESSION ---------- */
 async function enterSession(user, opts){
   try{ setDbWarning(false); }catch(e){}
-  try{ await expireExpiredBans(); }catch(e){}
 
   opts = opts || {};
-  if(!DEVICE_ID) await initDevice();
+  if(!DEVICE_ID){
+    try{ await withTimeout(initDevice(), 1200); }catch(e){
+      try{ DEVICE_ID = localStorage.getItem('gz_device_id') || ('tmp_'+Date.now()); }catch(e2){ DEVICE_ID = 'tmp_'+Date.now(); }
+    }
+  }
 
   // Post-CAPTCHA bot: device ban 80m + delete account + admin log
   try{
@@ -3079,29 +3091,31 @@ async function enterSession(user, opts){
     }
   }catch(e){ console.warn('bot enforce session', e); }
 
-  if(user.banned && user.ban_until && new Date(user.ban_until) <= new Date()){
-    const { data: updated } = await sb.from('users').update({
-      banned:false, ban_type:null, ban_reason:null, ban_until:null, banned_at:null
-    }).eq('id', user.id).select().single();
-    if(updated) user = updated;
-  }
-  if(user.banned && user.ban_type === 'device'){
-    const activeDev = await getActiveDeviceBan();
-    if(!activeDev){
-      const { data: updated } = await sb.from('users').update({
-        banned:false, ban_type:null, ban_reason:null, ban_until:null, banned_at:null
-      }).eq('id', user.id).select().single();
-      if(updated) user = updated;
+  // Quick ban checks (never hang)
+  try{
+    if(user.banned && user.ban_until && new Date(user.ban_until) <= new Date()){
+      user = { ...user, banned:false, ban_type:null, ban_reason:null, ban_until:null, banned_at:null };
+      try{
+        await withTimeout(
+          sb.from('users').update({
+            banned:false, ban_type:null, ban_reason:null, ban_until:null, banned_at:null
+          }).eq('id', user.id),
+          2000
+        );
+      }catch(e){}
     }
-  }
-  // Always re-check device ban (even if account not marked banned)
-  const devBanNow = await getActiveDeviceBan();
-  if(devBanNow){ showDeviceBanScreen(devBanNow); return; }
-
+  }catch(e){}
+  try{
+    const devBanNow = await withTimeout(getActiveDeviceBan(), 2000);
+    if(devBanNow){ showDeviceBanScreen(devBanNow); return; }
+  }catch(e){}
   if(user.banned){ showUserBanScreen(user); return; }
-
-  // Only block auto-login from saved session if this device was kicked
-  if(opts.fromSaved && await checkDeviceRevoked(user.id)) return;
+  try{
+    if(opts.fromSaved){
+      const kicked = await withTimeout(checkDeviceRevoked(user.id), 2000);
+      if(kicked) return;
+    }
+  }catch(e){}
 
   CURRENT_USER = user;
 
@@ -3116,6 +3130,7 @@ async function enterSession(user, opts){
 
   // Background session tasks (do not block first paint)
   (async ()=>{
+    try{ await expireExpiredBans(); }catch(e){}
     try{
       await Promise.race([
         (async()=>{
@@ -3164,6 +3179,44 @@ async function enterSession(user, opts){
   try{ expireExpiredBans(); }catch(e){}
 }
 
+
+function dedupeDevicesById(rows){
+  if(!rows || !rows.length) return [];
+  const map = new Map();
+  for(const d of rows){
+    const key = d.device_id || d.id;
+    if(!key) continue;
+    const prev = map.get(key);
+    if(!prev){ map.set(key, d); continue; }
+    // keep newest last_seen
+    const t1 = new Date(prev.last_seen||0).getTime();
+    const t2 = new Date(d.last_seen||0).getTime();
+    if(t2 >= t1) map.set(key, d);
+  }
+  return Array.from(map.values()).sort((a,b)=> new Date(b.last_seen||0)-new Date(a.last_seen||0));
+}
+
+async function cleanupDuplicateDevices(userId){
+  if(!sb || !userId) return;
+  try{
+    const { data } = await sb.from('devices').select('id,device_id,last_seen').eq('user_id', userId).order('last_seen',{ascending:false}).limit(100);
+    if(!data || data.length < 2) return;
+    const keep = new Set();
+    const del = [];
+    for(const d of data){
+      const k = d.device_id || d.id;
+      if(keep.has(k)) del.push(d.id);
+      else keep.add(k);
+    }
+    if(del.length){
+      // delete in chunks
+      for(let i=0;i<del.length;i+=20){
+        await sb.from('devices').delete().in('id', del.slice(i,i+20));
+      }
+    }
+  }catch(e){ console.warn('dedupe devices', e); }
+}
+
 async function registerCurrentDevice(userId){
   if(!DEVICE_ID || !userId) return;
   const s = DEVICE_INFO.signals || collectDeviceSignals();
@@ -3182,22 +3235,19 @@ async function registerCurrentDevice(userId){
     revoked_at: null
   };
   try{
-    // Deduplicate: keep a single row per (device_id, user_id)
+    // One row per (device_id, user_id) only
     const { data: rows } = await sb.from('devices').select('id').eq('device_id', DEVICE_ID).eq('user_id', userId);
     if(rows && rows.length){
       const keepId = rows[0].id;
       await sb.from('devices').update(row).eq('id', keepId);
       const extras = rows.slice(1).map(r=>r.id);
-      if(extras.length){
-        await sb.from('devices').delete().in('id', extras);
-      }
+      if(extras.length) await sb.from('devices').delete().in('id', extras);
     } else {
       await sb.from('devices').insert({ ...row, first_seen: new Date().toISOString() });
     }
-    // Cleanup long-revoked rows for this user (details already cleared)
-    try{
-      await sb.from('devices').delete().eq('user_id', userId).eq('revoked', true);
-    }catch(e){}
+    try{ await sb.from('devices').delete().eq('user_id', userId).eq('revoked', true); }catch(e){}
+    // purge any other duplicate fingerprints for this account
+    try{ await cleanupDuplicateDevices(userId); }catch(e){}
   }catch(e){ console.warn('device register', e); }
 }
 
@@ -3221,10 +3271,13 @@ async function loadAccountDevices(){
   const box = $('accountDevicesList');
   if(!box || !CURRENT_USER) return;
   box.innerHTML = inlineLoadingHtml('Loading devices');
-  const { data, error } = await sb.from('devices').select('*').eq('user_id', CURRENT_USER.id).eq('revoked', false).order('last_seen',{ascending:false}).limit(20);
+  const { data, error } = await sb.from('devices').select('*').eq('user_id', CURRENT_USER.id).eq('revoked', false).order('last_seen',{ascending:false}).limit(40);
   if(error || !data){ box.innerHTML = '<div class="empty-note">Could not load devices</div>'; return; }
-  if(!data.length){ box.innerHTML = '<div class="empty-note">No devices recorded yet</div>'; return; }
-  box.innerHTML = data.map(d=>{
+  const list = dedupeDevicesById(data);
+  // async cleanup of DB duplicates (don't block UI)
+  try{ cleanupDuplicateDevices(CURRENT_USER.id); }catch(e){}
+  if(!list.length){ box.innerHTML = '<div class="empty-note">No devices recorded yet</div>'; return; }
+  box.innerHTML = list.map(d=>{
     const isThis = d.device_id === DEVICE_ID;
     const kicked = !!d.revoked;
     const title = escapeHtml(d.label || d.platform || 'Device');
@@ -3947,9 +4000,12 @@ async function openUserModal(u){
     if(showAdmin || (CURRENT_USER && CURRENT_USER.id === u.id)){
       devWrap.classList.remove('hidden');
       devBox.innerHTML = 'Loading…';
-      sb.from('devices').select('*').eq('user_id', u.id).eq('revoked', false).order('last_seen',{ascending:false}).limit(20).then(({data})=>{
+      sb.from('devices').select('*').eq('user_id', u.id).eq('revoked', false).order('last_seen',{ascending:false}).limit(40).then(({data})=>{
         if(!data || !data.length){ devBox.innerHTML = '<div>No devices logged</div>'; return; }
-        devBox.innerHTML = data.map(d=>{
+        try{ cleanupDuplicateDevices(u.id); }catch(e){}
+        const list = dedupeDevicesById(data);
+        if(!list.length){ devBox.innerHTML = '<div>No devices logged</div>'; return; }
+        devBox.innerHTML = list.map(d=>{
           const kicked = d.revoked ? ' · REVOKED' : '';
           return `<div style="padding:8px 0;border-bottom:1px solid var(--border);">
             <div><b style="color:var(--text);">${escapeHtml((d.platform||'?'))}</b> · ${escapeHtml(d.screen||'')}${kicked}</div>
@@ -4321,7 +4377,7 @@ async function loadChatUsers(){
 }
 
 
-async async function applyLiveUserUpdate(row){
+async function applyLiveUserUpdate(row){
   if(!row || !CURRENT_USER || row.id !== CURRENT_USER.id) return;
   const prev = CURRENT_USER;
   CURRENT_USER = { ...CURRENT_USER, ...row };
