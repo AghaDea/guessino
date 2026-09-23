@@ -1,1 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Guessino · Login</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
 
+<div id="app">
+  <div id="loadingScreen" class="loading-wrap">
+    <div class="spinner"></div>
+    <div class="t">Loading…</div>
+  </div>
+
+  <div id="authScreen" class="auth-wrap hidden">
+    <div class="auth-card">
+      <div class="auth-logo">Guess<span>ino</span></div>
+      <div class="auth-sub" id="authSub">Sign in to continue</div>
+      <div id="authError" class="err-msg hidden"></div>
+      <div class="field"><label>Username</label><input id="authUsername" maxlength="16" placeholder="2 to 16 characters" autocomplete="username"></div>
+      <div class="field"><label>Password</label><input id="authPassword" type="password" maxlength="15" placeholder="3 to 15 characters" autocomplete="current-password"></div>
+      <div style="position:absolute;left:-9999px;top:-9999px;width:1px;height:1px;overflow:hidden;" aria-hidden="true" tabindex="-1">
+        <label for="authWebsite">Website</label>
+        <input id="authWebsite" name="website" type="text" tabindex="-1" autocomplete="off">
+      </div>
+      <div class="verify-wrap">
+        <label>Drag the cut piece onto the checkered hole</label>
+        <div class="puzzle-wrap" id="puzzleCaptcha"><div class="puzzle-board" id="puzzleBoard"><canvas id="puzzleCanvas"></canvas><div class="puzzle-target" id="puzzleTarget"></div><div class="puzzle-piece" id="puzzlePiece"></div></div><div class="puzzle-hint">Put the image piece back into the checkered hole</div><div class="puzzle-status" id="puzzleStatus"></div></div>
+      </div>
+      <button class="btn btn-primary" id="authSubmitBtn">Log In</button>
+      <div class="switch-line" id="authSwitchLine">Don't have an account? <a href="#" id="authSwitchLink">Sign up</a></div>
+    </div>
+  </div>
+
+  <div id="banScreen" class="ban-wrap hidden">
+    <div class="ban-card">
+      <div class="ban-icon">🚫</div>
+      <h2>Account restricted</h2>
+      <p id="banTypeText"></p>
+      <p id="banReasonText"></p>
+      <p id="banUntilText"></p>
+      <button class="btn btn-ghost" id="banLogoutBtn">Back to Login</button>
+    </div>
+  </div>
+</div>
+  <script src="js/script.js"></script>
+</body>
+</html>
