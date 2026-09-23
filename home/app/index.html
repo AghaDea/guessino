@@ -1860,6 +1860,7 @@ html:not([data-theme="light"]) .modal-bg{background:rgba(0,0,0,.78);}
         <div id="banUntilWrap">
           <label style="font-size:11px;color:var(--text-dim);">Until (empty = permanent)</label>
           <input type="datetime-local" id="banUntilInput">
+          <div style="font-size:11px;color:var(--text-dim);margin-top:4px;">Time is Tehran (Iran) — not your phone clock</div>
         </div>
         <button class="btn btn-primary" id="confirmBanBtn" style="margin-top:6px;">Confirm ban</button>
       </div>
@@ -2319,8 +2320,31 @@ function renderAvatar(el, user){
 }
 function fmtDate(d){
   if(!d) return '—';
-  const dt = new Date(d);
-  return dt.toLocaleDateString('en-US') + ' ' + dt.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'});
+  try{
+    return new Date(d).toLocaleString('en-GB', {
+      timeZone: 'Asia/Tehran',
+      year:'numeric', month:'2-digit', day:'2-digit',
+      hour:'2-digit', minute:'2-digit', hour12:false
+    }) + ' (Tehran)';
+  }catch(e){
+    const dt = new Date(d);
+    return dt.toLocaleDateString('en-US') + ' ' + dt.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'});
+  }
+}
+/** Interpret datetime-local value as Asia/Tehran wall-clock → UTC ISO */
+function tehranInputToISO(val){
+  if(!val) return null;
+  const m = String(val).trim().match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+  if(!m) return null;
+  const y=+m[1], mo=+m[2], d=+m[3], h=+m[4], mi=+m[5];
+  // Iran standard offset UTC+03:30 (no DST)
+  const utcMs = Date.UTC(y, mo-1, d, h, mi) - (3*60+30)*60*1000;
+  return new Date(utcMs).toISOString();
+}
+function nowTehranLabel(){
+  try{
+    return new Date().toLocaleString('en-GB',{timeZone:'Asia/Tehran', hour12:false}) + ' Tehran';
+  }catch(e){ return new Date().toISOString(); }
 }
 function escapeHtml(s){ return (s||'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function isOnline(last){
@@ -2909,10 +2933,46 @@ function inlineLoadingHtml(text){
   return `<div class="inline-loading">${text||'Loading'}<span class="dot">.</span><span class="dot">.</span><span class="dot">.</span></div>`;
 }
 
+
+/* ---- Auto-expire bans (Tehran/server now) ---- */
+async function expireExpiredBans(){
+  if(!sb) return;
+  try{
+    // Prefer RPC if available
+    try{
+      const { error } = await sb.rpc('expire_expired_bans');
+      if(!error) return;
+    }catch(e){}
+    // Fallback: client-side cleanup for current user + device list we can see
+    const nowIso = new Date().toISOString();
+    try{
+      await sb.from('users').update({
+        banned:false, ban_type:null, ban_reason:null, ban_until:null, banned_at:null
+      }).eq('banned', true).lte('ban_until', nowIso).not('ban_until','is', null);
+    }catch(e){}
+    try{
+      await sb.from('banned_devices').delete().lte('banned_until', nowIso).not('banned_until','is', null);
+    }catch(e){}
+  }catch(e){ console.warn('expire bans', e); }
+}
+
 async function getActiveDeviceBan(){
+  if(!sb || !DEVICE_ID) return null;
   const { data: devBan } = await sb.from('banned_devices').select('*').eq('device_id', DEVICE_ID).maybeSingle();
-  if(devBan && (!devBan.banned_until || new Date(devBan.banned_until) > new Date())) return devBan;
-  return null;
+  if(!devBan) return null;
+  if(devBan.banned_until && new Date(devBan.banned_until) <= new Date()){
+    try{ await sb.from('banned_devices').delete().eq('device_id', DEVICE_ID); }catch(e){}
+    // also clear user device-ban if linked
+    try{
+      if(CURRENT_USER && CURRENT_USER.banned && CURRENT_USER.ban_type === 'device'){
+        await sb.from('users').update({
+          banned:false, ban_type:null, ban_reason:null, ban_until:null, banned_at:null
+        }).eq('id', CURRENT_USER.id);
+      }
+    }catch(e){}
+    return null;
+  }
+  return devBan;
 }
 
 /* ---------- AUTH ---------- */
@@ -2998,6 +3058,7 @@ $('banLogoutBtn').onclick = ()=>{ localStorage.removeItem('gz_user_id'); gzGoLog
 /* ---------- SESSION ---------- */
 async function enterSession(user, opts){
   try{ setDbWarning(false); }catch(e){}
+  try{ await expireExpiredBans(); }catch(e){}
 
   opts = opts || {};
   if(!DEVICE_ID) await initDevice();
@@ -3097,8 +3158,10 @@ async function enterSession(user, opts){
   window.__onlineTimer = setInterval(async ()=>{
     if(!CURRENT_USER) return;
     try{ await sb.from('users').update({ last_online: new Date().toISOString() }).eq('id', CURRENT_USER.id); }catch(e){}
+    try{ await expireExpiredBans(); }catch(e){}
     try{ await syncCurrentUserFromServer(); }catch(e){}
   }, 15000);
+  try{ expireExpiredBans(); }catch(e){}
 }
 
 async function registerCurrentDevice(userId){
@@ -3927,7 +3990,7 @@ $('confirmBanBtn').onclick = async ()=>{
   if(!canModerateUser(u) || !hasPerm('ban')){ toast('No permission to ban'); return; }
   const reason = $('banReasonInput').value.trim() || 'No reason';
   const untilVal = $('banUntilInput').value;
-  const until = untilVal ? new Date(untilVal).toISOString() : null;
+  const until = untilVal ? tehranInputToISO(untilVal) : null;
   if(!(await askConfirm('Confirm ban', `Ban @${u.username} (${pendingBanType})?`))) return;
   const confirmBtn = $('confirmBanBtn');
   if(confirmBtn.disabled) return;
@@ -4258,15 +4321,37 @@ async function loadChatUsers(){
 }
 
 
-function applyLiveUserUpdate(row){
+async async function applyLiveUserUpdate(row){
   if(!row || !CURRENT_USER || row.id !== CURRENT_USER.id) return;
   const prev = CURRENT_USER;
   CURRENT_USER = { ...CURRENT_USER, ...row };
 
-  // Ban took effect while online
+  // Ban took effect while online — or auto-clear if expired
   if(row.banned){
     const expired = row.ban_until && new Date(row.ban_until) <= new Date();
-    if(!expired){
+    if(expired){
+      try{
+        await sb.from('users').update({
+          banned:false, ban_type:null, ban_reason:null, ban_until:null, banned_at:null
+        }).eq('id', row.id);
+        if(row.ban_type === 'device' && DEVICE_ID){
+          await sb.from('banned_devices').delete().eq('device_id', DEVICE_ID);
+        }
+        try{ await expireExpiredBans(); }catch(e){}
+      }catch(e){}
+      CURRENT_USER.banned = false;
+      CURRENT_USER.ban_type = null;
+      CURRENT_USER.ban_reason = null;
+      CURRENT_USER.ban_until = null;
+      // if currently on ban screen, go to app
+      try{
+        if($('banScreen') && !$('banScreen').classList.contains('hidden')){
+          hideAllScreens();
+          $('mainApp').classList.remove('hidden');
+          toast('Ban expired — welcome back');
+        }
+      }catch(e){}
+    } else {
       toast('Your account has been restricted');
       showUserBanScreen(CURRENT_USER);
       return;
@@ -4300,7 +4385,7 @@ async function syncCurrentUserFromServer(){
   if(!CURRENT_USER || !sb) return;
   try{
     const { data } = await sb.from('users').select('*').eq('id', CURRENT_USER.id).maybeSingle();
-    if(data) applyLiveUserUpdate(data);
+    if(data) await applyLiveUserUpdate(data);
   }catch(e){}
   try{
     if(DEVICE_ID){
@@ -7089,22 +7174,66 @@ async function sendClanChatFrom(inputEl, refreshFn){
   if(window.__clanChatSending) return;
   window.__clanChatSending = true;
   const sendBtns = [$('clanChatSendBtn'), $('chatClanSendBtn')].filter(Boolean);
-  sendBtns.forEach(b=>{ b.disabled = true; b.dataset._old = b.innerHTML; b.innerHTML = '<span class="gz-spin"></span>'; });
-  if(inputEl){ inputEl.disabled = true; }
+  sendBtns.forEach(b=>{ b.disabled = true; b.dataset._old = b.innerHTML; b.innerHTML = '<span class="gz-spin" aria-hidden="true"></span>'; });
+  const boxes = [$('clanChatMessages'), $('chatClanMessages')].filter(Boolean);
+  const tempId = 'tmp_'+Date.now();
+  const pendingHtml = `<div class="clan-msg pending" data-temp="${tempId}" style="opacity:.85">
+    <div style="display:flex;align-items:center;gap:6px;margin-bottom:2px;">
+      <b>@${escapeHtml(CURRENT_USER.username)}</b>
+      <span class="gz-spin" style="width:12px;height:12px;border-width:2px;"></span>
+      <span style="font-size:11px;color:var(--text-dim);">sending…</span>
+    </div>
+    <div>${escapeHtml(body)}</div>
+  </div>`;
+  if(inputEl) inputEl.value = '';
+  boxes.forEach(box=>{
+    if(!box) return;
+    // remove empty note
+    const empty = box.querySelector('.empty-note');
+    if(empty) empty.remove();
+    if(box.querySelector('.inline-loading')) box.innerHTML = '';
+    box.insertAdjacentHTML('beforeend', pendingHtml);
+    box.scrollTop = box.scrollHeight;
+  });
   try{
-    if(inputEl) inputEl.value = '';
-    const { error } = await sb.from('clan_messages').insert({
+    const { data, error } = await sb.from('clan_messages').insert({
       clan_id: MY_CLAN.clan.id,
       sender_id: CURRENT_USER.id,
       sender_username: CURRENT_USER.username,
       msg_type: 'chat',
       body
+    }).select().single();
+    if(error){
+      boxes.forEach(box=>{
+        const el = box && box.querySelector('[data-temp="'+tempId+'"]');
+        if(el) el.remove();
+      });
+      toast(error.message||'Send failed');
+      return;
+    }
+    // replace pending with real bubble (no full refresh)
+    boxes.forEach(box=>{
+      if(!box) return;
+      const el = box.querySelector('[data-temp="'+tempId+'"]');
+      if(el && typeof renderClanChatBubble === 'function'){
+        el.outerHTML = renderClanChatBubble(data, MY_CLAN.clan);
+      } else if(el){
+        el.classList.remove('pending');
+        el.removeAttribute('data-temp');
+        const spin = el.querySelector('.gz-spin');
+        if(spin) spin.remove();
+        const st = el.querySelector('span[style*="sending"]');
+        if(st) st.textContent = 'sent';
+      }
     });
-    if(error){ toast(error.message||'Send failed'); return; }
-    if(typeof refreshFn === 'function') await refreshFn();
-    else await loadClanChat();
-  }catch(e){ toast('Send failed'); }
-  finally{
+    boxes.forEach(box=>{ if(box) box.scrollTop = box.scrollHeight; });
+  }catch(e){
+    boxes.forEach(box=>{
+      const el = box && box.querySelector('[data-temp="'+tempId+'"]');
+      if(el) el.remove();
+    });
+    toast('Send failed');
+  }finally{
     window.__clanChatSending = false;
     sendBtns.forEach(b=>{ b.disabled = false; b.innerHTML = b.dataset._old || 'Send'; });
     if(inputEl) inputEl.disabled = false;
@@ -7210,23 +7339,49 @@ function openDisplayBadgesPicker(){
   if(typeof selected==='string') try{selected=JSON.parse(selected);}catch(e){selected=[];}
   if(!Array.isArray(selected)) selected = [];
   const unlocked = Array.isArray(CURRENT_USER.achievements) ? CURRENT_USER.achievements : [];
-  const list = (typeof ACHIEVEMENTS!=='undefined'?ACHIEVEMENTS:[]).filter(a=> unlocked.includes(a.id) || a.check(CURRENT_USER));
+  const list = (typeof ACHIEVEMENTS!=='undefined'?ACHIEVEMENTS:[]).filter(a=>{
+    try{ return unlocked.includes(a.id) || (typeof a.check==='function' && a.check(CURRENT_USER)); }
+    catch(e){ return unlocked.includes(a.id); }
+  });
   box.innerHTML = list.map(a=>{
     const on = selected.includes(a.id);
     return `<label style="display:flex;align-items:center;gap:8px;padding:8px;border-bottom:1px solid var(--border);cursor:pointer;">
-      <input type="checkbox" value="${a.id}" ${on?'checked':''}> <span>${escapeHtml(a.name)}</span>
+      <input type="checkbox" value="${escapeHtml(a.id)}" ${on?'checked':''}> <span>${escapeHtml(a.name)}</span>
       <span style="font-size:11px;color:var(--text-dim);margin-left:auto;">${escapeHtml(a.desc||'')}</span></label>`;
   }).join('') || '<div class="empty-note">Unlock achievements first</div>';
+  box.querySelectorAll('input[type=checkbox]').forEach(cb=>{
+    cb.addEventListener('change', ()=>{
+      const n = box.querySelectorAll('input[type=checkbox]:checked').length;
+      if(n > 3){ cb.checked = false; toast('Max 3 badges'); }
+    });
+  });
 }
 async function saveDisplayBadges(){
+  if(!CURRENT_USER || !sb) return;
   const checks = [...document.querySelectorAll('#displayBadgesList input[type=checkbox]:checked')].map(c=>c.value);
   if(checks.length > 3) return toast('Max 3 badges');
-  const { data, error } = await sb.from('users').update({ display_badges: checks }).eq('id', CURRENT_USER.id).select().single();
-  if(error) return toast(error.message||'Error');
-  CURRENT_USER = data;
-  $('displayBadgesModal').classList.add('hidden');
-  renderProfDisplayBadges();
-  toast('Badges saved');
+  const btn = $('saveDisplayBadgesBtn');
+  if(btn){ btn.disabled = true; }
+  try{
+    const { data, error } = await sb.from('users').update({ display_badges: checks }).eq('id', CURRENT_USER.id).select('id,display_badges,achievements,username').single();
+    if(error){
+      // column missing or RLS
+      toast(error.message || 'Could not save badges — run latest SQL (display_badges column)');
+      return;
+    }
+    CURRENT_USER.display_badges = (data && data.display_badges != null) ? data.display_badges : checks;
+    if(typeof CURRENT_USER.display_badges === 'string'){
+      try{ CURRENT_USER.display_badges = JSON.parse(CURRENT_USER.display_badges); }catch(e){ CURRENT_USER.display_badges = checks; }
+    }
+    if(!Array.isArray(CURRENT_USER.display_badges)) CURRENT_USER.display_badges = checks;
+    $('displayBadgesModal').classList.add('hidden');
+    renderProfDisplayBadges();
+    toast('Badges saved');
+  }catch(e){
+    toast('Save failed');
+  }finally{
+    if(btn) btn.disabled = false;
+  }
 }
 
 /* --- 40 User tags: show in user modal if present --- */
