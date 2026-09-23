@@ -2222,14 +2222,19 @@ async function hashFingerprint(str){
 
 async function buildDeviceId(){
   const sig = collectDeviceSignals();
-  // stable core signals (changing browser minor version shouldn't always reset)
+  // CRITICAL: never regenerate id if we already have one — prevents duplicate devices
+  try{
+    const cached = localStorage.getItem('gz_device_id');
+    if(cached && String(cached).length > 8){
+      return { id: cached, signals: sig, coreFp: cached };
+    }
+  }catch(e){}
   const core = [
     sig.platform, sig.language, sig.screen, sig.timezone,
     String(sig.cores), String(sig.memory), String(sig.touch),
-    String(sig.maxTouch), sig.vendor, sig.canvas, sig.colorDepth
+    String(sig.maxTouch), sig.vendor, sig.colorDepth
   ].join('|');
   const fp = await hashFingerprint(core);
-  // keep a local seed so even similar phones get unique id when possible
   let seed = null;
   try{ seed = localStorage.getItem('gz_device_seed'); }catch(e){}
   if(!seed){
@@ -2829,6 +2834,12 @@ async function boot(){
   let left = false;
   const leave = (why)=>{
     if(left) return;
+    // Never bounce to login if we already entered the app
+    if(CURRENT_USER) return;
+    try{
+      const main = $('mainApp');
+      if(main && !main.classList.contains('hidden')) return;
+    }catch(e){}
     left = true;
     try{ clearTimeout(forceLeave); }catch(e){}
     console.warn('boot leave:', why);
@@ -2840,8 +2851,8 @@ async function boot(){
       try{ location.replace('../login/'); }catch(e2){}
     }
   };
-  // hard escape — never stay on Loading forever (some phones hang on network)
-  const forceLeave = setTimeout(()=> leave('force_timeout'), 6000);
+  // Only as last resort — network can be slow after login
+  const forceLeave = setTimeout(()=> leave('force_timeout'), 18000);
 
   try{
     // 1) DB client (max ~5s)
@@ -2892,9 +2903,9 @@ async function boot(){
           4000
         );
         if(result && !result.error && result.data){
-          await enterSession(result.data, { fromSaved: true });
           left = true;
-          clearTimeout(forceLeave);
+          try{ clearTimeout(forceLeave); }catch(e){}
+          await enterSession(result.data, { fromSaved: true });
           return;
         }
       }catch(e){ console.warn('session load', e); }
@@ -3110,6 +3121,9 @@ async function enterSession(user, opts){
     if(devBanNow){ showDeviceBanScreen(devBanNow); return; }
   }catch(e){}
   if(user.banned){ showUserBanScreen(user); return; }
+  // Register/un-revoke THIS device first (so login is never bounced by stale revoked row)
+  try{ await withTimeout(registerCurrentDevice(user.id), 2500); }catch(e){}
+
   try{
     if(opts.fromSaved){
       const kicked = await withTimeout(checkDeviceRevoked(user.id), 2000);
@@ -3135,7 +3149,7 @@ async function enterSession(user, opts){
       await Promise.race([
         (async()=>{
           try{ await sb.from('users').update({ last_online: new Date().toISOString(), device_id: DEVICE_ID }).eq('id', user.id); }catch(e){}
-          try{ await registerCurrentDevice(user.id); }catch(e){}
+          try{ await registerCurrentDevice(user.id); }catch(e){} // refresh last_seen
           try{ await ensureWeeklyReset(); }catch(e){}
           try{
             const { data: freshU } = await sb.from('users').select('*').eq('id', user.id).maybeSingle();
@@ -3218,8 +3232,8 @@ async function cleanupDuplicateDevices(userId){
 }
 
 async function registerCurrentDevice(userId){
-  if(!DEVICE_ID || !userId) return;
-  const s = DEVICE_INFO.signals || collectDeviceSignals();
+  if(!DEVICE_ID || !userId || !sb) return;
+  const s = (DEVICE_INFO && DEVICE_INFO.signals) || collectDeviceSignals();
   const row = {
     device_id: DEVICE_ID,
     user_id: userId,
@@ -3235,8 +3249,7 @@ async function registerCurrentDevice(userId){
     revoked_at: null
   };
   try{
-    // One row per (device_id, user_id) only
-    const { data: rows } = await sb.from('devices').select('id').eq('device_id', DEVICE_ID).eq('user_id', userId);
+    const { data: rows } = await sb.from('devices').select('id,first_seen').eq('device_id', DEVICE_ID).eq('user_id', userId).order('first_seen',{ascending:true});
     if(rows && rows.length){
       const keepId = rows[0].id;
       await sb.from('devices').update(row).eq('id', keepId);
@@ -3245,8 +3258,7 @@ async function registerCurrentDevice(userId){
     } else {
       await sb.from('devices').insert({ ...row, first_seen: new Date().toISOString() });
     }
-    try{ await sb.from('devices').delete().eq('user_id', userId).eq('revoked', true); }catch(e){}
-    // purge any other duplicate fingerprints for this account
+    // remove only revoked OTHER devices' clutter later; keep current active
     try{ await cleanupDuplicateDevices(userId); }catch(e){}
   }catch(e){ console.warn('device register', e); }
 }
@@ -3255,16 +3267,43 @@ async function registerCurrentDevice(userId){
 async function checkDeviceRevoked(userId){
   if(!DEVICE_ID || !userId || !sb) return false;
   try{
-    const { data } = await sb.from('devices').select('revoked').eq('device_id', DEVICE_ID).eq('user_id', userId).maybeSingle();
-    if(data && data.revoked){
-      localStorage.removeItem('gz_user_id');
-      CURRENT_USER = null;
-      toast('This device was removed from the account');
-      gzGoLogin();
-      return true;
-    }
+    const { data: rows } = await sb.from('devices').select('id,revoked').eq('device_id', DEVICE_ID).eq('user_id', userId);
+    if(!rows || !rows.length) return false; // no row yet — register will create
+    // if ANY non-revoked row exists for this device, allow
+    if(rows.some(r => !r.revoked)) return false;
+    // all revoked → kicked
+    localStorage.removeItem('gz_user_id');
+    CURRENT_USER = null;
+    toast('This device was removed from the account');
+    gzGoLogin();
+    return true;
   }catch(e){}
   return false;
+}
+
+
+/** First device that joined this account (oldest first_seen) owns kick rights */
+async function getOwnerDeviceId(userId){
+  if(!sb || !userId) return null;
+  try{
+    const { data } = await sb.from('devices').select('device_id,first_seen,last_seen')
+      .eq('user_id', userId).eq('revoked', false)
+      .order('first_seen', { ascending: true, nullsFirst: false })
+      .limit(50);
+    if(!data || !data.length) return DEVICE_ID;
+    // prefer rows with first_seen; else oldest last_seen
+    const sorted = [...data].sort((a,b)=>{
+      const fa = a.first_seen ? new Date(a.first_seen).getTime() : Number.MAX_SAFE_INTEGER;
+      const fb = b.first_seen ? new Date(b.first_seen).getTime() : Number.MAX_SAFE_INTEGER;
+      if(fa !== fb) return fa - fb;
+      return new Date(a.last_seen||0).getTime() - new Date(b.last_seen||0).getTime();
+    });
+    return sorted[0].device_id || DEVICE_ID;
+  }catch(e){ return DEVICE_ID; }
+}
+async function isOwnerDevice(userId){
+  const owner = await getOwnerDeviceId(userId || (CURRENT_USER && CURRENT_USER.id));
+  return !!(owner && DEVICE_ID && owner === DEVICE_ID);
 }
 
 async function loadAccountDevices(){
@@ -3274,9 +3313,12 @@ async function loadAccountDevices(){
   const { data, error } = await sb.from('devices').select('*').eq('user_id', CURRENT_USER.id).eq('revoked', false).order('last_seen',{ascending:false}).limit(40);
   if(error || !data){ box.innerHTML = '<div class="empty-note">Could not load devices</div>'; return; }
   const list = dedupeDevicesById(data);
-  // async cleanup of DB duplicates (don't block UI)
   try{ cleanupDuplicateDevices(CURRENT_USER.id); }catch(e){}
   if(!list.length){ box.innerHTML = '<div class="empty-note">No devices recorded yet</div>'; return; }
+  let canKick = false;
+  try{ canKick = await isOwnerDevice(CURRENT_USER.id); }catch(e){ canKick = false; }
+  const kickAllBtn = $('kickAllDevicesBtn');
+  if(kickAllBtn) kickAllBtn.classList.toggle('hidden', !canKick);
   box.innerHTML = list.map(d=>{
     const isThis = d.device_id === DEVICE_ID;
     const kicked = !!d.revoked;
@@ -3290,11 +3332,13 @@ async function loadAccountDevices(){
     const ua = escapeHtml((d.user_agent||'').slice(0,90));
     let actions = '';
     if(isThis){
-      actions = '<span style="color:var(--green);font-weight:700;font-size:11px;">Current</span>';
+      actions = '<span style="color:var(--green);font-weight:700;font-size:11px;">Current'+(canKick?' · Owner':'')+'</span>';
     } else if(kicked){
       actions = '<span style="color:var(--text-dim);font-size:11px;">Kicked</span>';
-    } else {
+    } else if(canKick){
       actions = `<button type="button" class="btn btn-ghost" style="width:auto;padding:6px 10px;font-size:11px;border-radius:8px;" data-kick="${escapeHtml(d.id)}">Kick out</button>`;
+    } else {
+      actions = '<span style="color:var(--text-dim);font-size:11px;">—</span>';
     }
     return `<div class="device-row" style="padding:10px 0;border-bottom:1px solid var(--border);">
       <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;">
@@ -3312,6 +3356,7 @@ async function loadAccountDevices(){
   box.querySelectorAll('[data-kick]').forEach(btn=>{
     btn.onclick = async ()=>{
       const id = btn.getAttribute('data-kick');
+      if(!(await isOwnerDevice(CURRENT_USER.id))){ toast('Only the account owner device can kick others'); return; }
       if(!(await askConfirm('Kick device', 'Remove this device from your account? It will be logged out on next open.'))) return;
       const { error } = await sb.from('devices').update({
         revoked: true,
@@ -3349,6 +3394,7 @@ async function loadAccountDevices(){
 
 async function kickAllOtherDevices(){
   if(!CURRENT_USER) return;
+  if(!(await isOwnerDevice(CURRENT_USER.id))){ toast('Only the account owner device can kick others'); return; }
   if(!(await askConfirm('Kick all others', 'Log out every other device on this account?'))) return;
   const { error } = await sb.from('devices').update({
     revoked: true,
