@@ -657,6 +657,13 @@ async function hashFingerprint(str){
 }
 
 async function buildDeviceId(){
+  try{
+    const cached = localStorage.getItem('gz_device_id');
+    if(cached && String(cached).length > 8){
+      return { id: cached };
+    }
+  }catch(e){}
+
   const sig = collectDeviceSignals();
   const core = [
     sig.platform, sig.language, sig.screen, sig.avail, sig.timezone,
@@ -1214,12 +1221,17 @@ function goHome(){
 async function registerCurrentDevice(userId){
   if(!sb || !userId || !DEVICE_ID) return;
   try{
-    const { data: existing } = await sb.from('devices').select('id').eq('user_id', userId).eq('device_id', DEVICE_ID).maybeSingle();
-    if(existing){
-      await sb.from('devices').update({ last_seen: new Date().toISOString(), revoked: false }).eq('id', existing.id);
+    const { data: rows } = await sb.from('devices').select('id').eq('user_id', userId).eq('device_id', DEVICE_ID);
+    if(rows && rows.length){
+      await sb.from('devices').update({ last_seen: new Date().toISOString(), revoked: false, revoked_at: null }).eq('id', rows[0].id);
+      if(rows.length > 1){
+        const extras = rows.slice(1).map(r=>r.id);
+        await sb.from('devices').delete().in('id', extras);
+      }
     } else {
       await sb.from('devices').insert({
-        user_id: userId, device_id: DEVICE_ID, last_seen: new Date().toISOString(), revoked: false
+        user_id: userId, device_id: DEVICE_ID, last_seen: new Date().toISOString(),
+        first_seen: new Date().toISOString(), revoked: false
       });
     }
   }catch(e){ console.warn(e); }
