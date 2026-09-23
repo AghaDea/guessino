@@ -105,8 +105,6 @@ async function sha256(str){
   return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
 }
 
-
-
 /* ========== ULTRA ANTI-BOT + HARD CAPTCHA v3 ========== */
 const AUTH_OPENED_AT = Date.now();
 
@@ -1011,24 +1009,45 @@ if(!sb){ errBox.textContent=sbNotConnectedMessage(); errBox.classList.remove('hi
       await logAntiBot('signup', {username,user_id:newUser.id,note:'ok',pow_ms:pow.ms});
       await finishLogin(newUser);
     }else{
-      const result = await withTimeout(
-        sb.from('users').select('*').ilike('username', username).maybeSingle(), 8000
-      );
-      if(result.error) throw result.error;
-      const user=result.data;
+      let user = null;
+      try{
+        const rpc = await withTimeout(sb.rpc('login_user', { p_username: username, p_password_hash: hash }), 8000);
+        if(rpc && !rpc.error && rpc.data && rpc.data.ok && rpc.data.user){
+          user = rpc.data.user;
+        } else if(rpc && rpc.data && rpc.data.reason === 'bad_password'){
+          errBox.textContent='Incorrect password.';
+          errBox.classList.remove('hidden');
+          resetPuzzleCaptcha();
+          recordFail();
+          return;
+        } else if(rpc && rpc.data && rpc.data.reason === 'not_found'){
+          errBox.textContent='Username not found.';
+          errBox.classList.remove('hidden');
+          resetPuzzleCaptcha();
+          recordFail();
+          return;
+        }
+      }catch(e){ console.warn('login rpc', e); }
       if(!user){
-        errBox.textContent='Username not found.';
-        errBox.classList.remove('hidden');
-        resetPuzzleCaptcha();
-        recordFail();
-        return;
-      }
-      if(user.password_hash !== hash){
-        errBox.textContent='Incorrect password.';
-        errBox.classList.remove('hidden');
-        resetPuzzleCaptcha();
-        recordFail();
-        return;
+        const result = await withTimeout(
+          sb.from('users').select('*').ilike('username', username).maybeSingle(), 8000
+        );
+        if(result.error) throw result.error;
+        user = result.data;
+        if(!user){
+          errBox.textContent='Username not found.';
+          errBox.classList.remove('hidden');
+          resetPuzzleCaptcha();
+          recordFail();
+          return;
+        }
+        if(user.password_hash !== hash){
+          errBox.textContent='Incorrect password.';
+          errBox.classList.remove('hidden');
+          resetPuzzleCaptcha();
+          recordFail();
+          return;
+        }
       }
       await finishLogin(user);
     }
