@@ -1,4 +1,4 @@
-/* ========== RED DEAD REDEMPTION theme — visual only ========== */
+
 @import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700;900&family=EB+Garamond:ital,wght@0,400;0,600;0,700;1,400&display=swap');
 
 :root{
@@ -204,7 +204,6 @@ button:disabled{opacity:.5;cursor:default;pointer-events:none;}
 body{min-height:100vh;min-height:100dvh;}
 .auth-wrap{min-height:100vh;min-height:100dvh;}
 
-/* LIGHT — parchment noon */
 html[data-theme="light"]{
   --bg:#e8d9b8;
   --bg-elev:#f5ebd4;
