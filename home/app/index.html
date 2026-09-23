@@ -118,13 +118,26 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>Guessino | Number Guess</title>
+<link rel="preconnect" href="https://ihbsxjgzrhnssluqooqh.supabase.co" crossorigin>
+<link rel="dns-prefetch" href="https://ihbsxjgzrhnssluqooqh.supabase.co">
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<link rel="dns-prefetch" href="https://cdn.jsdelivr.net">
+<link rel="preconnect" href="https://unpkg.com" crossorigin>
+<link rel="dns-prefetch" href="https://unpkg.com">
+<link rel="preload" as="script" href="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.1/dist/umd/supabase.min.js">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700;900&family=EB+Garamond:ital,wght@0,400;0,600;0,700;1,400&display=swap">
 <script>
 (function(){
+  /* Pinned, versioned URLs first: these are immutable and already warmed in the
+     CDN edge cache network-wide, so they resolve faster than the unversioned
+     "@2" aliases (which require an extra lookup to find the latest release). */
   var urls=[
-    'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2',
-    'https://unpkg.com/@supabase/supabase-js@2',
     'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.1/dist/umd/supabase.min.js',
-    'https://unpkg.com/@supabase/supabase-js@2.49.1/dist/umd/supabase.min.js'
+    'https://unpkg.com/@supabase/supabase-js@2.49.1/dist/umd/supabase.min.js',
+    'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2',
+    'https://unpkg.com/@supabase/supabase-js@2'
   ];
   window.__sbLoadPromise=new Promise(function(resolve){
     var i=0;
@@ -1071,8 +1084,10 @@ nav.tabbar .tab-badge.hide{display:none;}
 #adminExtraStats{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;}
 #adminExtraStats .admin-stat b{font-size:18px;}
 
-/* ========== RED DEAD theme override — visual only ========== */
-@import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700;900&family=EB+Garamond:ital,wght@0,400;0,600;0,700;1,400&display=swap');
+/* ========== RED DEAD theme override — visual only ==========
+   (Cinzel / EB Garamond font is now loaded via a <link> tag in <head>
+   instead of @import here, so the browser can start fetching it
+   immediately instead of waiting to parse this far into the stylesheet.) */
 
 :root{
   --bg:#0b0907 !important;
@@ -2384,7 +2399,7 @@ function levelTitleHtml(level){
 }
 function verifiedBadgeHtml(user){
   if(!user || !user.tik) return '';
-  return `<span class="tik-badge" title="Verified"><img src="https://upload.wikimedia.org/wikipedia/commons/e/e4/Twitter_Verified_Badge.svg" alt="" width="15" height="15" draggable="false"></span>`;
+  return `<span class="tik-badge" title="Verified"><img src="https://upload.wikimedia.org/wikipedia/commons/e/e4/Twitter_Verified_Badge.svg" alt="" width="15" height="15" draggable="false" decoding="async"></span>`;
 }
 function clanTagHtml(user, sm){
   if(!user) return '';
@@ -4819,7 +4834,7 @@ function appendMessageBubble(m){
     const preview = orig.content ? escapeHtml(orig.content).slice(0,80) : '📷 Photo';
     quoteHtml = `<div class="msg-quote">${preview}</div>`;
   }
-  const imgHtml = m.image_url ? `<img src="${m.image_url}" class="msg-img" alt="">` : '';
+  const imgHtml = m.image_url ? `<img src="${m.image_url}" class="msg-img" alt="" loading="lazy" decoding="async">` : '';
   const textHtml = m.content ? `<div class="msg-text">${escapeHtml(m.content)}</div>` : '';
   const canDelete = adminWatchMode ? (CURRENT_USER && CURRENT_USER.is_admin) : (mine || (CURRENT_USER && CURRENT_USER.is_admin));
   const canReport = !adminWatchMode && !mine && chatPartner;
@@ -5160,7 +5175,7 @@ async function openReportDetail(r){
   const reporter = reportUserCache[r.reporter_id]||{};
   const reported = reportUserCache[r.reported_id]||{};
   let msgHtml = '';
-  if(r.message_image_url) msgHtml += `<div style="margin-top:10px;"><b>Photo</b><br><img src="${String(r.message_image_url).replace(/"/g,'&quot;')}" style="max-width:100%;border-radius:10px;margin-top:6px;"></div>`;
+  if(r.message_image_url) msgHtml += `<div style="margin-top:10px;"><b>Photo</b><br><img src="${String(r.message_image_url).replace(/"/g,'&quot;')}" style="max-width:100%;border-radius:10px;margin-top:6px;" loading="lazy" decoding="async"></div>`;
   if(r.message_snapshot) msgHtml += `<div style="margin-top:10px;padding:10px;background:var(--bg);border:1px solid var(--border);border-radius:10px;"><b>Content</b><div style="margin-top:6px;white-space:pre-wrap;">${escapeHtml(r.message_snapshot)}</div></div>`;
   $('reportDetailBody').innerHTML = `
     <div class="detail-row"><span>Status</span><span class="support-status ${r.status}">${escapeHtml(r.status)}</span></div>
