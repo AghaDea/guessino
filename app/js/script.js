@@ -6013,41 +6013,71 @@ function subscribeDuelRoom(roomId){
 
 function startDuelWatch(){
   try{ if(_duelWatchTimer) clearInterval(_duelWatchTimer); }catch(e){}
+  window.__duelOfflineStrikes = 0;
+  const OFFLINE_MS = 120000;   // 2 min without last_online
+  const NEED_STRIKES = 3;      // need 3 consecutive polls (~6s) before cancel
+  const GRACE_MS = 90000;      // no auto-cancel in first 90s of room life / accept
   const tick = async ()=>{
     if(!ACTIVE_DUEL || !CURRENT_USER || !sb) return;
     try{
-      await sb.from('users').update({ last_online: new Date().toISOString() }).eq('id', CURRENT_USER.id);
-      const { data: room } = await sb.from('duel_rooms').select('*').eq('id', ACTIVE_DUEL.id).maybeSingle();
+      // keep me marked online while in duel
+      try{
+        await sb.from('users').update({ last_online: new Date().toISOString() }).eq('id', CURRENT_USER.id);
+        CURRENT_USER.last_online = new Date().toISOString();
+      }catch(e){}
+      const { data: room, error: roomErr } = await sb.from('duel_rooms').select('*').eq('id', ACTIVE_DUEL.id).maybeSingle();
+      if(roomErr){ console.warn('duel poll room', roomErr); return; }
       if(!room){
-        clearDuelLocal(0);
-        toast('Duel room closed');
-        try{ startNewRound(); }catch(e){}
+        // transient fetch miss — do not cancel immediately
+        window.__duelOfflineStrikes = (window.__duelOfflineStrikes||0) + 1;
+        if(window.__duelOfflineStrikes >= 5){
+          clearDuelLocal(0);
+          toast('Duel room closed');
+          try{ startNewRound(); }catch(e){}
+        }
         return;
       }
+      window.__duelOfflineStrikes = 0;
       const prevStatus = ACTIVE_DUEL.status;
-      // Any status change → handle (critical: pending→active without refresh)
       if(room.status !== prevStatus || room.locked !== ACTIVE_DUEL.locked || room.winner_id !== ACTIVE_DUEL.winner_id){
         await handleDuelRoomUpdate(room, 'POLL');
         return;
       }
       if(room.status === 'finished' || room.status === 'cancelled') return;
-      // opponent offline > 40s → auto cancel for both
+
+      // grace: do not auto-cancel right after create/accept
+      const t0 = room.accepted_at || room.updated_at || room.created_at;
+      if(t0 && (Date.now() - new Date(t0).getTime()) < GRACE_MS){
+        window.__duelOppMiss = 0;
+        return;
+      }
+
       const otherId = room.creator_id === CURRENT_USER.id ? room.opponent_id : room.creator_id;
-      const { data: other } = await sb.from('users').select('last_online').eq('id', otherId).maybeSingle();
-      const otherAge = other && other.last_online ? (Date.now() - new Date(other.last_online).getTime()) : 999999;
-      if(otherAge > 40000){
+      if(!otherId) return;
+      const { data: other, error: oErr } = await sb.from('users').select('last_online').eq('id', otherId).maybeSingle();
+      if(oErr || !other){
+        // unknown / network — do not treat as offline
+        return;
+      }
+      if(!other.last_online){
+        // never cancel solely because last_online is null
+        return;
+      }
+      const otherAge = Date.now() - new Date(other.last_online).getTime();
+      if(otherAge > OFFLINE_MS){
+        window.__duelOppMiss = (window.__duelOppMiss||0) + 1;
+        if(window.__duelOppMiss < NEED_STRIKES) return;
         await sb.from('duel_rooms').update({
           status:'cancelled', locked:true, finished_at:new Date().toISOString(), updated_at:new Date().toISOString()
         }).eq('id', room.id).in('status',['pending','active']);
-        // local close; other side will poll and close too
         await handleDuelRoomUpdate(Object.assign({}, room, { status:'cancelled', locked:true }), 'POLL');
+      } else {
+        window.__duelOppMiss = 0;
       }
-    }catch(e){}
+    }catch(e){ console.warn('duel watch', e); }
   };
   _duelWatchTimer = setInterval(tick, 2000);
-  // run once immediately
   tick();
-  // also on tab focus
   if(!window.__duelVisBound){
     window.__duelVisBound = true;
     document.addEventListener('visibilitychange', ()=>{
@@ -6090,7 +6120,14 @@ function enterDuelGame(room){
     return;
   }
   window.__duelEnteredId = room.id;
+  window.__duelOppMiss = 0;
+  window.__duelOfflineStrikes = 0;
   ACTIVE_DUEL = room;
+  // mark me online immediately so the other side does not auto-cancel
+  try{
+    sb.from('users').update({ last_online: new Date().toISOString() }).eq('id', CURRENT_USER.id);
+    CURRENT_USER.last_online = new Date().toISOString();
+  }catch(e){}
   gameMode = room.mode || 'normal';
   try{ localStorage.setItem('gz_game_mode', gameMode); }catch(e){}
   const wrap = $('modeTabs');
@@ -6288,6 +6325,10 @@ async function acceptDuelInvite(){
   const roomId = _pendingDuelInviteRoomId;
   if($('duelInviteModal')) $('duelInviteModal').classList.add('hidden');
   try{
+    try{
+      await sb.from('users').update({ last_online: new Date().toISOString() }).eq('id', CURRENT_USER.id);
+      CURRENT_USER.last_online = new Date().toISOString();
+    }catch(e){}
     let room = null;
     try{
       const { data, error } = await sb.rpc('accept_duel', { p_room_id: roomId, p_user_id: CURRENT_USER.id });
