@@ -27,9 +27,9 @@ button:active{transform:scale(.97)}
   <div class="spinner" aria-hidden="true"></div>
   <h1 id="title">Temporarily unavailable</h1>
   <p id="msg">A quick update is in progress. The page will refresh automatically.</p>
-  <div class="countdown" id="timer">00:00:00</div>
+  <div class="countdown" id="timer">--:--:--</div>
   <div class="progress"><div class="bar" id="bar"></div></div>
-  <div class="meta"><span>Until end (server)</span><span id="syncLabel">sync…</span></div>
+  <div class="meta"><span id="metaLeft">Until end (server)</span><span id="syncLabel">sync…</span></div>
   <button type="button" id="retry">Try now</button>
 </div>
 <script>
@@ -46,11 +46,18 @@ button:active{transform:scale(.97)}
     }
     return path.replace(/\/(app|login|update)\/?$/i, '/');
   }
+  window.__gzSiteUpdateActive = function(row) {
+    if (!row || !row.enabled) return false;
+    if (!row.ends_at) return true; // no date = on until disabled
+    var end = Date.parse(row.ends_at);
+    if (!isFinite(end)) return !!row.enabled;
+    return end > Date.now();
+  };
   window.__gzSiteUpdateFetch = function(cb) {
     var done = false;
     function finish(row) { if (done) return; done = true; try { cb(row || null); } catch (e) {} }
-    var t = setTimeout(function(){ finish(null); }, 4000);
-    try {
+    var t = setTimeout(function(){ finish(null); }, 4500);
+    function fromRest() {
       fetch(SUPABASE_URL + '/rest/v1/site_update?id=eq.1&select=enabled,ends_at,title,message&limit=1', {
         headers: {
           'apikey': SUPABASE_ANON_KEY,
@@ -59,16 +66,54 @@ button:active{transform:scale(.97)}
         }
       }).then(function(r){ return r.ok ? r.json() : []; }).then(function(rows){
         clearTimeout(t);
-        finish(rows && rows[0] ? rows[0] : null);
+        var row = rows && rows[0] ? rows[0] : null;
+        // client-side clear if past (best-effort)
+        if (row && row.enabled && row.ends_at) {
+          var end = Date.parse(row.ends_at);
+          if (isFinite(end) && end <= Date.now()) {
+            row.enabled = false;
+            row.ends_at = null;
+            try {
+              fetch(SUPABASE_URL + '/rest/v1/site_update?id=eq.1', {
+                method: 'PATCH',
+                headers: {
+                  'apikey': SUPABASE_ANON_KEY,
+                  'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
+                  'Content-Type': 'application/json',
+                  'Prefer': 'return=minimal'
+                },
+                body: JSON.stringify({ enabled: false, ends_at: null, updated_at: new Date().toISOString() })
+              }).catch(function(){});
+            } catch (e) {}
+          }
+        }
+        finish(row);
       }).catch(function(){ clearTimeout(t); finish(null); });
-    } catch (e) { clearTimeout(t); finish(null); }
-  };
-  window.__gzSiteUpdateActive = function(row) {
-    if (!row || !row.enabled) return false;
-    if (!row.ends_at) return false;
-    var end = Date.parse(row.ends_at);
-    if (!isFinite(end)) return false;
-    return end > Date.now();
+    }
+    // prefer RPC normalize
+    try {
+      fetch(SUPABASE_URL + '/rest/v1/rpc/site_update_normalize', {
+        method: 'POST',
+        headers: {
+          'apikey': SUPABASE_ANON_KEY,
+          'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        body: '{}'
+      }).then(function(r){ return r.ok ? r.json() : null; }).then(function(data){
+        if (data && data.ok) {
+          clearTimeout(t);
+          finish({
+            enabled: !!data.enabled && !!data.active,
+            ends_at: data.ends_at,
+            title: data.title,
+            message: data.message,
+            _active: !!data.active
+          });
+        } else fromRest();
+      }).catch(function(){ fromRest(); });
+    } catch (e) { fromRest(); }
   };
   window.__gzGoUpdate = function() {
     try { location.replace(baseRoot() + 'update/'); }
@@ -81,11 +126,12 @@ button:active{transform:scale(.97)}
   var msgEl=document.getElementById('msg');
   var timerEl=document.getElementById('timer');
   var bar=document.getElementById('bar');
+  var metaLeft=document.getElementById('metaLeft');
   var syncLabel=document.getElementById('syncLabel');
   var retry=document.getElementById('retry');
   var endsAt=0;
+  var indefinite=false;
   var totalSpan=0;
-  var tickId=null;
 
   function pad(n){ n=Math.max(0,n|0); return n<10?'0'+n:''+n; }
   function fmt(ms){
@@ -111,16 +157,20 @@ button:active{transform:scale(.97)}
     }catch(e){ location.replace(baseDir()+'login/'); }
   }
   function paint(){
+    if(indefinite){
+      timerEl.textContent='--:--:--';
+      bar.style.transform='scaleX(1)';
+      metaLeft.textContent='No end time';
+      return;
+    }
+    metaLeft.textContent='Until end (server)';
     var left=endsAt-Date.now();
     timerEl.textContent=fmt(left);
     if(totalSpan>0){
       var r=Math.max(0,Math.min(1,left/totalSpan));
       bar.style.transform='scaleX('+r+')';
     }else bar.style.transform='scaleX(0)';
-    if(left<=0 && endsAt>0){
-      // ended locally — recheck server
-      syncFromServer();
-    }
+    if(left<=0 && endsAt>0) syncFromServer();
   }
   function syncFromServer(){
     syncLabel.textContent='sync…';
@@ -129,6 +179,13 @@ button:active{transform:scale(.97)}
       if(!window.__gzSiteUpdateActive(row)){ leave(); return; }
       if(row.title) titleEl.textContent=row.title;
       if(row.message) msgEl.textContent=row.message;
+      if(!row.ends_at){
+        indefinite=true;
+        endsAt=0;
+        paint();
+        return;
+      }
+      indefinite=false;
       var end=Date.parse(row.ends_at);
       if(!isFinite(end)){ leave(); return; }
       endsAt=end;
@@ -138,8 +195,7 @@ button:active{transform:scale(.97)}
       paint();
     });
   }
-  if(tickId) clearInterval(tickId);
-  tickId=setInterval(paint,1000);
+  setInterval(paint,1000);
   setInterval(syncFromServer,15000);
   retry.addEventListener('click',syncFromServer);
   syncFromServer();
