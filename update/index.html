@@ -29,7 +29,7 @@ button:active{transform:scale(.97)}
   <p id="msg">A quick update is in progress. The page will refresh automatically.</p>
   <div class="countdown" id="timer">--:--:--</div>
   <div class="progress"><div class="bar" id="bar"></div></div>
-  <div class="meta"><span id="metaLeft">Until end (server)</span><span id="syncLabel">sync…</span></div>
+  <div class="meta"><span id="metaLeft">Until end</span><span id="syncLabel">sync…</span></div>
   <button type="button" id="retry">Try now</button>
 </div>
 <script>
@@ -163,7 +163,7 @@ button:active{transform:scale(.97)}
       metaLeft.textContent='No end time';
       return;
     }
-    metaLeft.textContent='Until end (server)';
+    metaLeft.textContent='Until end';
     var left=endsAt-Date.now();
     timerEl.textContent=fmt(left);
     if(totalSpan>0){
@@ -196,7 +196,7 @@ button:active{transform:scale(.97)}
     });
   }
   setInterval(paint,1000);
-  setInterval(syncFromServer,15000);
+  setInterval(syncFromServer,100000000000000);
   retry.addEventListener('click',syncFromServer);
   syncFromServer();
 })();
