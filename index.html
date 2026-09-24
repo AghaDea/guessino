@@ -5,6 +5,49 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>Guessino</title>
 <script>
+
+(function(){
+  var SUPABASE_URL = 'https://ihbsxjgzrhnssluqooqh.supabase.co';
+  var SUPABASE_ANON_KEY = 'sb_publishable_hHyHJI5JkxgLNrXAwZrGWQ_vbD3kdrj';
+  function baseRoot() {
+    var path = location.pathname || '/';
+    if (/\/index\.html$/i.test(path)) path = path.replace(/\/index\.html$/i, '/');
+    else if (!path.endsWith('/')) {
+      if (/\.[a-zA-Z0-9]+$/.test(path.split('/').pop())) path = path.replace(/\/[^/]*$/, '/');
+      else path = path + '/';
+    }
+    return path.replace(/\/(app|login|update)\/?$/i, '/');
+  }
+  window.__gzSiteUpdateFetch = function(cb) {
+    var done = false;
+    function finish(row) { if (done) return; done = true; try { cb(row || null); } catch (e) {} }
+    var t = setTimeout(function(){ finish(null); }, 4000);
+    try {
+      fetch(SUPABASE_URL + '/rest/v1/site_update?id=eq.1&select=enabled,ends_at,title,message&limit=1', {
+        headers: {
+          'apikey': SUPABASE_ANON_KEY,
+          'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
+          'Accept': 'application/json'
+        }
+      }).then(function(r){ return r.ok ? r.json() : []; }).then(function(rows){
+        clearTimeout(t);
+        finish(rows && rows[0] ? rows[0] : null);
+      }).catch(function(){ clearTimeout(t); finish(null); });
+    } catch (e) { clearTimeout(t); finish(null); }
+  };
+  window.__gzSiteUpdateActive = function(row) {
+    if (!row || !row.enabled) return false;
+    if (!row.ends_at) return false;
+    var end = Date.parse(row.ends_at);
+    if (!isFinite(end)) return false;
+    return end > Date.now();
+  };
+  window.__gzGoUpdate = function() {
+    try { location.replace(baseRoot() + 'update/'); }
+    catch (e) { location.replace('/update/'); }
+  };
+})();
+
 (function () {
   function baseDir() {
     var path = location.pathname || '/';
@@ -15,14 +58,17 @@
     }
     return path;
   }
-  try {
-    var b = baseDir();
-    if (localStorage.getItem('gz_user_id')) location.replace(b + 'app/');
-    else location.replace(b + 'login/');
-  } catch (e) {
-    try { location.replace('login/'); }
-    catch (e2) { location.replace('/login/'); }
+  function go(p) {
+    try { location.replace(baseDir() + p); }
+    catch (e) { location.replace('/' + p); }
   }
+  window.__gzSiteUpdateFetch(function (row) {
+    if (window.__gzSiteUpdateActive(row)) { go('update/'); return; }
+    try {
+      if (localStorage.getItem('gz_user_id')) go('app/');
+      else go('login/');
+    } catch (e) { go('login/'); }
+  });
 })();
 </script>
 </head>
