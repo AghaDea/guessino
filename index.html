@@ -18,11 +18,18 @@
     }
     return path.replace(/\/(app|login|update)\/?$/i, '/');
   }
+  window.__gzSiteUpdateActive = function(row) {
+    if (!row || !row.enabled) return false;
+    if (!row.ends_at) return true; // no date = on until disabled
+    var end = Date.parse(row.ends_at);
+    if (!isFinite(end)) return !!row.enabled;
+    return end > Date.now();
+  };
   window.__gzSiteUpdateFetch = function(cb) {
     var done = false;
     function finish(row) { if (done) return; done = true; try { cb(row || null); } catch (e) {} }
-    var t = setTimeout(function(){ finish(null); }, 4000);
-    try {
+    var t = setTimeout(function(){ finish(null); }, 4500);
+    function fromRest() {
       fetch(SUPABASE_URL + '/rest/v1/site_update?id=eq.1&select=enabled,ends_at,title,message&limit=1', {
         headers: {
           'apikey': SUPABASE_ANON_KEY,
@@ -31,16 +38,54 @@
         }
       }).then(function(r){ return r.ok ? r.json() : []; }).then(function(rows){
         clearTimeout(t);
-        finish(rows && rows[0] ? rows[0] : null);
+        var row = rows && rows[0] ? rows[0] : null;
+        // client-side clear if past (best-effort)
+        if (row && row.enabled && row.ends_at) {
+          var end = Date.parse(row.ends_at);
+          if (isFinite(end) && end <= Date.now()) {
+            row.enabled = false;
+            row.ends_at = null;
+            try {
+              fetch(SUPABASE_URL + '/rest/v1/site_update?id=eq.1', {
+                method: 'PATCH',
+                headers: {
+                  'apikey': SUPABASE_ANON_KEY,
+                  'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
+                  'Content-Type': 'application/json',
+                  'Prefer': 'return=minimal'
+                },
+                body: JSON.stringify({ enabled: false, ends_at: null, updated_at: new Date().toISOString() })
+              }).catch(function(){});
+            } catch (e) {}
+          }
+        }
+        finish(row);
       }).catch(function(){ clearTimeout(t); finish(null); });
-    } catch (e) { clearTimeout(t); finish(null); }
-  };
-  window.__gzSiteUpdateActive = function(row) {
-    if (!row || !row.enabled) return false;
-    if (!row.ends_at) return false;
-    var end = Date.parse(row.ends_at);
-    if (!isFinite(end)) return false;
-    return end > Date.now();
+    }
+    // prefer RPC normalize
+    try {
+      fetch(SUPABASE_URL + '/rest/v1/rpc/site_update_normalize', {
+        method: 'POST',
+        headers: {
+          'apikey': SUPABASE_ANON_KEY,
+          'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        body: '{}'
+      }).then(function(r){ return r.ok ? r.json() : null; }).then(function(data){
+        if (data && data.ok) {
+          clearTimeout(t);
+          finish({
+            enabled: !!data.enabled && !!data.active,
+            ends_at: data.ends_at,
+            title: data.title,
+            message: data.message,
+            _active: !!data.active
+          });
+        } else fromRest();
+      }).catch(function(){ fromRest(); });
+    } catch (e) { fromRest(); }
   };
   window.__gzGoUpdate = function() {
     try { location.replace(baseRoot() + 'update/'); }
