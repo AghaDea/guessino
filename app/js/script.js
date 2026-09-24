@@ -14,6 +14,34 @@
   } catch (e) { goLogin(); }
 })();
 
+/* Site update gate — enabled + ends_at */
+(function(){
+  var SUPABASE_URL = 'https://ihbsxjgzrhnssluqooqh.supabase.co';
+  var SUPABASE_ANON_KEY = 'sb_publishable_hHyHJI5JkxgLNrXAwZrGWQ_vbD3kdrj';
+  function baseDir(){
+    var path=location.pathname||'/';
+    if(/\/index\.html$/i.test(path)) path=path.replace(/\/index\.html$/i,'/');
+    else if(!path.endsWith('/')){
+      if(/\.[a-zA-Z0-9]+$/.test(path.split('/').pop())) path=path.replace(/\/[^/]*$/,'/');
+      else path=path+'/';
+    }
+    return path.replace(/\/app\/?$/i,'/');
+  }
+  try{
+    fetch(SUPABASE_URL+'/rest/v1/site_update?id=eq.1&select=enabled,ends_at&limit=1',{
+      headers:{'apikey':SUPABASE_ANON_KEY,'Authorization':'Bearer '+SUPABASE_ANON_KEY}
+    }).then(function(r){return r.ok?r.json():[];}).then(function(rows){
+      var row=rows&&rows[0];
+      if(!row||!row.enabled||!row.ends_at) return;
+      var end=Date.parse(row.ends_at);
+      if(isFinite(end)&&end>Date.now()){
+        try{location.replace(baseDir()+'update/');}catch(e){location.replace('/update/');}
+      }
+    }).catch(function(){});
+  }catch(e){}
+})();
+
+
 /* ========== ANTI-BOT GATE v3.2 — hard signals only (no false positives) ========== */
 (function(){
   'use strict';
