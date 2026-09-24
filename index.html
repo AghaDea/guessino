@@ -3,27 +3,129 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Guessino</title>
+<title>Service Update</title>
+<style>
+  :root {
+    --bg: #0a0a0a;
+    --fg: #f0f0f0;
+    --muted: #7a7a7a;
+    --line: #1c1c1c;
+    --accent: #2e2e2e;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    min-height: 100vh;
+    background: var(--bg);
+    color: var(--fg);
+    font: 15px/1.55 system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+    display: grid;
+    place-items: center;
+    padding: 1.5rem;
+  }
+  .card {
+    max-width: 360px;
+    width: 100%;
+    text-align: center;
+  }
+  .spinner {
+    width: 40px;
+    height: 40px;
+    margin: 0 auto 1.5rem;
+    border: 2px solid var(--accent);
+    border-top-color: var(--muted);
+    border-radius: 50%;
+    animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  h1 {
+    font-size: 1.1rem;
+    font-weight: 600;
+    letter-spacing: -0.025em;
+    margin-bottom: 0.4rem;
+  }
+  p {
+    color: var(--muted);
+    font-size: 0.88rem;
+    margin-bottom: 1.5rem;
+  }
+  .progress {
+    height: 2px;
+    background: var(--line);
+    border-radius: 1px;
+    overflow: hidden;
+    margin-bottom: 1rem;
+  }
+  .bar {
+    height: 100%;
+    width: 100%;
+    background: var(--muted);
+    transform-origin: left;
+    transition: transform 1s linear;
+  }
+  .meta {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.75rem;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+  button {
+    margin-top: 1.5rem;
+    background: transparent;
+    border: 1px solid var(--accent);
+    color: var(--fg);
+    padding: 0.5rem 1.15rem;
+    border-radius: 5px;
+    font-size: 0.82rem;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  button:hover {
+    border-color: #444;
+    background: #111;
+  }
+  button:active { transform: scale(0.97); }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="spinner" aria-hidden="true"></div>
+    <h1>Temporarily unavailable</h1>
+    <p>A quick update is in progress. The page will refresh automatically.</p>
+    <div class="progress">
+      <div class="bar" id="bar"></div>
+    </div>
+    <div class="meta">
+      <span>Auto-refresh</span>
+      <span id="timer">0:30</span>
+    </div>
+    <button type="button" id="retry">Try now</button>
+  </div>
 <script>
 (function () {
-  function baseDir() {
-    var path = location.pathname || '/';
-    if (/\/index\.html$/i.test(path)) path = path.replace(/\/index\.html$/i, '/');
-    else if (!path.endsWith('/')) {
-      if (/\.[a-zA-Z0-9]+$/.test(path.split('/').pop())) path = path.replace(/\/[^/]*$/, '/');
-      else path = path + '/';
+  const bar = document.getElementById("bar");
+  const timer = document.getElementById("timer");
+  const retry = document.getElementById("retry");
+  const total = 30;
+  let left = total;
+
+  function pad(n) { return n < 10 ? "0" + n : n; }
+
+  function update() {
+    timer.textContent = "0:" + pad(left);
+    bar.style.transform = "scaleX(" + (left / total) + ")";
+    if (left <= 0) {
+      clearInterval(id);
+      location.reload();
+      return;
     }
-    return path;
+    left--;
   }
-  try {
-    var b = baseDir();
-    if (localStorage.getItem('gz_user_id')) location.replace(b + 'home/app/');
-    else location.replace(b + 'home/login/');
-  } catch (e) {
-    location.replace('home/login/');
-  }
+
+  const id = setInterval(update, 1000);
+  update();
+  retry.addEventListener("click", () => location.reload());
 })();
 </script>
-</head>
-<body></body>
+</body>
 </html>
