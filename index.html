@@ -4,96 +4,9 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>Guessino</title>
-  <body style="background:#000000;">
+<body style="margin:0; background:#000; color:#fff;">
+<script src="Config/load-config.js"></script>
 <script>
-
-(function(){
-  var SUPABASE_URL = 'https://ihbsxjgzrhnssluqooqh.supabase.co';
-  var SUPABASE_ANON_KEY = 'sb_publishable_hHyHJI5JkxgLNrXAwZrGWQ_vbD3kdrj';
-  function baseRoot() {
-    var path = location.pathname || '/';
-    if (/\/index\.html$/i.test(path)) path = path.replace(/\/index\.html$/i, '/');
-    else if (!path.endsWith('/')) {
-      if (/\.[a-zA-Z0-9]+$/.test(path.split('/').pop())) path = path.replace(/\/[^/]*$/, '/');
-      else path = path + '/';
-    }
-    return path.replace(/\/(app|login|update)\/?$/i, '/');
-  }
-  window.__gzSiteUpdateActive = function(row) {
-    if (!row || !row.enabled) return false;
-    if (!row.ends_at) return true; // no date = on until disabled
-    var end = Date.parse(row.ends_at);
-    if (!isFinite(end)) return !!row.enabled;
-    return end > Date.now();
-  };
-  window.__gzSiteUpdateFetch = function(cb) {
-    var done = false;
-    function finish(row) { if (done) return; done = true; try { cb(row || null); } catch (e) {} }
-    var t = setTimeout(function(){ finish(null); }, 4500);
-    function fromRest() {
-      fetch(SUPABASE_URL + '/rest/v1/site_update?id=eq.1&select=enabled,ends_at,title,message&limit=1', {
-        headers: {
-          'apikey': SUPABASE_ANON_KEY,
-          'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
-          'Accept': 'application/json'
-        }
-      }).then(function(r){ return r.ok ? r.json() : []; }).then(function(rows){
-        clearTimeout(t);
-        var row = rows && rows[0] ? rows[0] : null;
-        // client-side clear if past (best-effort)
-        if (row && row.enabled && row.ends_at) {
-          var end = Date.parse(row.ends_at);
-          if (isFinite(end) && end <= Date.now()) {
-            row.enabled = false;
-            row.ends_at = null;
-            try {
-              fetch(SUPABASE_URL + '/rest/v1/site_update?id=eq.1', {
-                method: 'PATCH',
-                headers: {
-                  'apikey': SUPABASE_ANON_KEY,
-                  'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
-                  'Content-Type': 'application/json',
-                  'Prefer': 'return=minimal'
-                },
-                body: JSON.stringify({ enabled: false, ends_at: null, updated_at: new Date().toISOString() })
-              }).catch(function(){});
-            } catch (e) {}
-          }
-        }
-        finish(row);
-      }).catch(function(){ clearTimeout(t); finish(null); });
-    }
-    // prefer RPC normalize
-    try {
-      fetch(SUPABASE_URL + '/rest/v1/rpc/site_update_normalize', {
-        method: 'POST',
-        headers: {
-          'apikey': SUPABASE_ANON_KEY,
-          'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
-          'Content-Type': 'application/json',
-          'Accept': 'application/json'
-        },
-        body: '{}'
-      }).then(function(r){ return r.ok ? r.json() : null; }).then(function(data){
-        if (data && data.ok) {
-          clearTimeout(t);
-          finish({
-            enabled: !!data.enabled && !!data.active,
-            ends_at: data.ends_at,
-            title: data.title,
-            message: data.message,
-            _active: !!data.active
-          });
-        } else fromRest();
-      }).catch(function(){ fromRest(); });
-    } catch (e) { fromRest(); }
-  };
-  window.__gzGoUpdate = function() {
-    try { location.replace(baseRoot() + 'update/'); }
-    catch (e) { location.replace('/update/'); }
-  };
-})();
-
 (function () {
   function baseDir() {
     var path = location.pathname || '/';
@@ -108,13 +21,46 @@
     try { location.replace(baseDir() + p); }
     catch (e) { location.replace('/' + p); }
   }
-  window.__gzSiteUpdateFetch(function (row) {
-    if (window.__gzSiteUpdateActive(row)) { go('update/'); return; }
+  function active(row) {
+    if (!row || !row.enabled) return false;
+    if (!row.ends_at) return true;
+    var end = Date.parse(row.ends_at);
+    return isFinite(end) && end > Date.now();
+  }
+  async function boot() {
+    var URL = '', KEY = '';
+    try {
+      var cfg = await loadGzConfig();
+      URL = cfg.SUPABASE_URL || '';
+      KEY = cfg.SUPABASE_ANON_KEY || '';
+    } catch (e) {}
+    if (URL && KEY) {
+      try {
+        var data = null;
+        try {
+          var r = await fetch(URL + '/rest/v1/rpc/site_update_normalize', {
+            method: 'POST',
+            headers: { 'apikey': KEY, 'Authorization': 'Bearer ' + KEY, 'Content-Type': 'application/json' },
+            body: '{}'
+          });
+          if (r.ok) data = await r.json();
+        } catch (e) {}
+        if (data && data.ok && data.active) { go('update/'); return; }
+        if (!data || !data.ok) {
+          var r2 = await fetch(URL + '/rest/v1/site_update?id=eq.1&select=enabled,ends_at&limit=1', {
+            headers: { 'apikey': KEY, 'Authorization': 'Bearer ' + KEY }
+          });
+          var rows = r2.ok ? await r2.json() : [];
+          if (active(rows && rows[0])) { go('update/'); return; }
+        }
+      } catch (e) {}
+    }
     try {
       if (localStorage.getItem('gz_user_id')) go('app/');
       else go('login/');
     } catch (e) { go('login/'); }
-  });
+  }
+  boot();
 })();
 </script>
 </head>
