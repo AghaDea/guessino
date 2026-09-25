@@ -384,36 +384,59 @@ function getDeviceId(){
   }catch(e){}
   return 'unknown';
 }
-function initials(name){ return (name||'?').trim().charAt(0).toUpperCase(); }
+function initials(name){
+  const s = String(name || '?').trim();
+  if(!s) return '?';
+  // two letters when possible (first + last alphanumeric)
+  const parts = s.split(/[^a-zA-Z0-9\u0600-\u06FF]+/).filter(Boolean);
+  if(parts.length >= 2){
+    return (parts[0].charAt(0) + parts[1].charAt(0)).toUpperCase();
+  }
+  const clean = s.replace(/[^a-zA-Z0-9\u0600-\u06FF]/g, '');
+  if(clean.length >= 2) return (clean.charAt(0) + clean.charAt(1)).toUpperCase();
+  return (clean.charAt(0) || s.charAt(0) || '?').toUpperCase();
+}
 const AVATAR_PALETTE = [
-  '#e17076','#faa774','#a695e7','#7bc862','#6ec9cb','#65aadd','#ee7aae','#f5b955',
-  '#b48bf2','#5cbbf0','#52c3a2','#f28b82','#c6a0f6','#7ec8e3','#f6bd60'
+  ['#3b82f6','#1d4ed8'],['#8b5cf6','#6d28d9'],['#ec4899','#be185d'],
+  ['#f59e0b','#d97706'],['#10b981','#047857'],['#06b6d4','#0e7490'],
+  ['#f43f5e','#be123c'],['#14b8a6','#0f766e'],['#a855f7','#7e22ce'],
+  ['#6366f1','#4338ca'],['#84cc16','#4d7c0f'],['#e11d48','#9f1239'],
+  ['#0ea5e9','#0369a1'],['#d946ef','#a21caf'],['#f97316','#c2410c']
 ];
 function avatarColorFor(seed){
   const s = String(seed || '?');
-  let h = 0;
-  for(let i=0;i<s.length;i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
-  return AVATAR_PALETTE[h % AVATAR_PALETTE.length];
+  let h = 2166136261;
+  for(let i=0;i<s.length;i++){
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return AVATAR_PALETTE[(h >>> 0) % AVATAR_PALETTE.length];
 }
 function isValidAvatarUrl(url){
   if(!url || typeof url !== 'string') return false;
   const u = url.trim();
   if(!u || u.length < 12) return false;
-  // data URL must be image/*
   if(/^data:image\/(png|jpe?g|gif|webp|svg\+xml);base64,/i.test(u)) return true;
-  // http(s) image-looking URL
   if(/^https?:\/\//i.test(u) && /\.(png|jpe?g|gif|webp|svg)(\?|$)/i.test(u)) return true;
-  // supabase storage / common CDN without extension
   if(/^https?:\/\//i.test(u) && (u.includes('supabase') || u.includes('/storage/') || u.includes('avatar'))) return true;
   return false;
 }
 function renderDefaultAvatar(el, user){
+  if(!el) return;
   const name = user ? (user.username || '?') : '?';
   const letter = initials(name);
-  const bg = avatarColorFor(user && user.id ? user.id : name);
-  el.style.background = bg;
+  const seed = (user && user.id) ? user.id : name;
+  const pair = avatarColorFor(seed);
+  const c1 = pair[0], c2 = pair[1];
+  el.style.background = 'linear-gradient(145deg,' + c1 + ' 0%,' + c2 + ' 100%)';
   el.style.color = '#fff';
-  el.innerHTML = letter;
+  el.style.display = 'flex';
+  el.style.alignItems = 'center';
+  el.style.justifyContent = 'center';
+  el.style.fontWeight = '800';
+  el.style.letterSpacing = letter.length > 1 ? '-0.02em' : '0';
+  el.style.textShadow = '0 1px 2px rgba(0,0,0,.25)';
+  el.innerHTML = '<span class="avatar-letter" aria-hidden="true">' + letter + '</span>';
 }
 function renderAvatar(el, user){
   if(!el) return;
@@ -1854,6 +1877,73 @@ async function registerWin(guesses, modeKey){
   try{ await bumpQuestProgressOnWin(guesses, newStreak); }catch(e){}
 }
 
+
+async function applyXpToCurrentUser(xpGained, crownsAdd){
+  if(!CURRENT_USER || !sb) return null;
+  xpGained = Math.max(0, Number(xpGained)||0);
+  crownsAdd = Math.max(0, Number(crownsAdd)||0);
+  if(xpGained <= 0 && crownsAdd <= 0) return CURRENT_USER;
+  let level = Number(CURRENT_USER.level)||1;
+  let level_xp = Number(CURRENT_USER.level_xp)||0;
+  let level_xp_needed = Number(CURRENT_USER.level_xp_needed)||50;
+  let xp = (Number(CURRENT_USER.xp)||0) + xpGained;
+  level_xp += xpGained;
+  while(level_xp >= level_xp_needed){
+    level_xp -= level_xp_needed;
+    level += 1;
+    level_xp_needed += 25;
+  }
+  const patch = {
+    xp, level, level_xp, level_xp_needed,
+    updated_at: new Date().toISOString()
+  };
+  if(crownsAdd > 0) patch.crowns = (Number(CURRENT_USER.crowns)||0) + crownsAdd;
+  const { data, error } = await sb.from('users').update(patch).eq('id', CURRENT_USER.id).select('*').single();
+  if(!error && data){
+    CURRENT_USER = data;
+    try{ refreshGameUI(); }catch(e){}
+    return data;
+  }
+  // local fallback
+  Object.assign(CURRENT_USER, patch);
+  try{ refreshGameUI(); }catch(e){}
+  return CURRENT_USER;
+}
+
+/** Grant quest reward once (idempotent via claimed flag) */
+async function grantQuestReward(q, row){
+  if(!CURRENT_USER || !sb || !q || !row) return false;
+  if(row.claimed) return false;
+  const done = row.completed || (Number(row.progress)||0) >= (Number(q.target_value)||1);
+  if(!done) return false;
+  try{
+    const { data: locked, error } = await sb.from('user_quests').update({
+      completed: true,
+      claimed: true,
+      updated_at: new Date().toISOString()
+    }).eq('id', row.id).eq('claimed', false).select('*').maybeSingle();
+    if(error || !locked) return false;
+
+    const xp = Math.max(0, Number(q.reward_xp)||0);
+    const crowns = Math.max(0, Number(q.reward_crowns)||0);
+    await applyXpToCurrentUser(xp, crowns);
+
+    const title = 'Quest reward';
+    const body = (q.title || 'Quest') + (xp ? (' · +' + xp + ' XP') : '') + (crowns ? (' · +' + crowns + ' crowns') : '');
+    try{
+      await pushNotification(CURRENT_USER.id, 'quest_reward', title, body, {
+        quest_id: q.id, code: q.code, reward_xp: xp, reward_crowns: crowns
+      });
+    }catch(e){}
+    try{ toast('🎯 ' + body); }catch(e){}
+    try{ refreshNotifBadge(); }catch(e){}
+    return true;
+  }catch(e){
+    console.warn('grantQuestReward', e);
+    return false;
+  }
+}
+
 async function bumpQuestProgressOnWin(guesses, streak){
   if(!CURRENT_USER) return;
   const dailyKey = currentPeriodKey('daily');
@@ -1878,15 +1968,19 @@ async function bumpQuestProgressOnWin(guesses, streak){
 
     if(!row){
       const prog = Math.min(q.target_value, add);
-      await sb.from('user_quests').insert({
+      const completed = prog >= q.target_value;
+      const { data: ins } = await sb.from('user_quests').insert({
         user_id: CURRENT_USER.id, quest_id: q.id, progress: prog,
-        completed: prog >= q.target_value, period_key: pk
-      });
-    } else if(!row.completed){
-      const prog = Math.min(q.target_value, (row.progress||0) + add);
-      await sb.from('user_quests').update({
-        progress: prog, completed: prog >= q.target_value, updated_at: new Date().toISOString()
-      }).eq('id', row.id);
+        completed, claimed: false, period_key: pk
+      }).select('*').maybeSingle();
+      if(completed && ins){ try{ await grantQuestReward(q, ins); }catch(e){} }
+    } else if(!row.claimed){
+      const prog = Math.min(q.target_value, (Number(row.progress)||0) + add);
+      const completed = prog >= q.target_value || row.completed;
+      const { data: upd } = await sb.from('user_quests').update({
+        progress: prog, completed, updated_at: new Date().toISOString()
+      }).eq('id', row.id).select('*').maybeSingle();
+      if(completed && upd){ try{ await grantQuestReward(q, upd); }catch(e){} }
     }
   }
 }
@@ -5197,20 +5291,39 @@ async function loadQuestsUI(){
       }
     }
 
+    // Claim any completed-but-unclaimed rewards (e.g. weekly XP missed before)
+    for(const q of quests){
+      const pk = q.type === 'weekly' ? weeklyKey : dailyKey;
+      const row = progMap[q.id + '|' + pk];
+      if(!row || row.claimed) continue;
+      const done = row.completed || (Number(row.progress)||0) >= (Number(q.target_value)||1);
+      if(done){
+        try{
+          const ok = await grantQuestReward(q, row);
+          if(ok){
+            row.claimed = true; row.completed = true;
+            progMap[q.id + '|' + pk] = row;
+          }
+        }catch(e){}
+      }
+    }
+
     box.innerHTML = quests.map(q=>{
       const pk = q.type === 'weekly' ? weeklyKey : dailyKey;
       const p = progMap[q.id + '|' + pk] || { progress:0, completed:false, claimed:false };
       const pct = Math.min(100, Math.round((p.progress / Math.max(1,q.target_value)) * 100));
       const done = p.completed || p.progress >= q.target_value;
+      const claimed = !!p.claimed;
       const reward = (q.reward_xp?`+${q.reward_xp} XP`:'') + (q.reward_crowns?` · ⚔️${q.reward_crowns}`:'');
       const typeLabel = q.type === 'weekly' ? 'Weekly' : (q.type === 'daily' ? 'Daily' : q.type);
-      return `<div class="quest-card ${done?'done':''}">
+      const status = claimed ? 'Claimed' : (done ? 'Reward ready' : (reward || 'Reward'));
+      return `<div class="quest-card ${done?'done':''} ${claimed?'claimed':''}">
         <div class="q-title">${escapeHtml(q.title)} <span style="font-size:10px;color:var(--text-dim);margin-left:4px;">${escapeHtml(typeLabel)}</span></div>
         <div class="q-desc">${escapeHtml(q.description||'')}</div>
         <div class="quest-progress"><i style="width:${pct}%"></i></div>
         <div class="quest-meta">
-          <span>${Math.min(p.progress,q.target_value)}/${q.target_value}${done?' ✓':''}</span>
-          <span class="quest-reward">${reward || 'Reward'}</span>
+          <span>${Math.min(p.progress||0,q.target_value)}/${q.target_value}${done?' ✓':''}</span>
+          <span class="quest-reward">${escapeHtml(status)}</span>
         </div>
       </div>`;
     }).join('');
@@ -6281,10 +6394,15 @@ async function onDuelFinished(room){
       if(dq){
         const { data: row } = await sb.from('user_quests').select('*').eq('user_id',CURRENT_USER.id).eq('quest_id',dq.id).eq('period_key',weeklyKey).maybeSingle();
         if(!row){
-          await sb.from('user_quests').insert({ user_id:CURRENT_USER.id, quest_id:dq.id, progress:1, completed:false, period_key:weeklyKey });
-        } else if(!row.completed){
-          const prog = Math.min(dq.target_value, (row.progress||0)+1);
-          await sb.from('user_quests').update({ progress:prog, completed: prog>=dq.target_value, updated_at:new Date().toISOString() }).eq('id', row.id);
+          const prog = 1;
+          const completed = prog >= dq.target_value;
+          const { data: ins } = await sb.from('user_quests').insert({ user_id:CURRENT_USER.id, quest_id:dq.id, progress:prog, completed, claimed:false, period_key:weeklyKey }).select('*').maybeSingle();
+          if(completed && ins){ try{ await grantQuestReward(dq, ins); }catch(e){} }
+        } else if(!row.claimed){
+          const prog = Math.min(dq.target_value, (Number(row.progress)||0)+1);
+          const completed = prog >= dq.target_value;
+          const { data: upd } = await sb.from('user_quests').update({ progress:prog, completed, updated_at:new Date().toISOString() }).eq('id', row.id).select('*').maybeSingle();
+          if(completed && upd){ try{ await grantQuestReward(dq, upd); }catch(e){} }
         }
       }
     }catch(e){}
