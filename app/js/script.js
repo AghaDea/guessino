@@ -1880,13 +1880,24 @@ async function registerWin(guesses, modeKey){
 
 async function applyXpToCurrentUser(xpGained, crownsAdd){
   if(!CURRENT_USER || !sb) return null;
-  xpGained = Math.max(0, Number(xpGained)||0);
-  crownsAdd = Math.max(0, Number(crownsAdd)||0);
+  xpGained = Math.max(0, Math.floor(Number(xpGained)||0));
+  crownsAdd = Math.max(0, Math.floor(Number(crownsAdd)||0));
   if(xpGained <= 0 && crownsAdd <= 0) return CURRENT_USER;
-  let level = Number(CURRENT_USER.level)||1;
-  let level_xp = Number(CURRENT_USER.level_xp)||0;
-  let level_xp_needed = Number(CURRENT_USER.level_xp_needed)||50;
-  let xp = (Number(CURRENT_USER.xp)||0) + xpGained;
+
+  // Prefer fresh DB values so level bar stays correct
+  let base = CURRENT_USER;
+  try{
+    const { data: fresh } = await sb.from('users')
+      .select('id,xp,level,level_xp,level_xp_needed,crowns')
+      .eq('id', CURRENT_USER.id).maybeSingle();
+    if(fresh) base = Object.assign({}, CURRENT_USER, fresh);
+  }catch(e){}
+
+  let level = Number(base.level)||1;
+  let level_xp = Number(base.level_xp)||0;
+  let level_xp_needed = Number(base.level_xp_needed)||50;
+  if(level_xp_needed < 1) level_xp_needed = 50;
+  let xp = (Number(base.xp)||0) + xpGained;
   level_xp += xpGained;
   while(level_xp >= level_xp_needed){
     level_xp -= level_xp_needed;
@@ -1894,49 +1905,94 @@ async function applyXpToCurrentUser(xpGained, crownsAdd){
     level_xp_needed += 25;
   }
   const patch = {
-    xp, level, level_xp, level_xp_needed,
-    updated_at: new Date().toISOString()
+    xp: xp,
+    level: level,
+    level_xp: level_xp,
+    level_xp_needed: level_xp_needed
   };
-  if(crownsAdd > 0) patch.crowns = (Number(CURRENT_USER.crowns)||0) + crownsAdd;
-  const { data, error } = await sb.from('users').update(patch).eq('id', CURRENT_USER.id).select('*').single();
+  if(crownsAdd > 0) patch.crowns = (Number(base.crowns)||0) + crownsAdd;
+
+  // Same style as registerWin (known working)
+  let data = null, error = null;
+  try{
+    const res = await sb.from('users').update(patch).eq('id', CURRENT_USER.id).select().single();
+    data = res.data; error = res.error;
+  }catch(e){ error = e; }
+
   if(!error && data){
-    CURRENT_USER = data;
-    try{ refreshGameUI(); }catch(e){}
-    return data;
+    CURRENT_USER = Object.assign({}, CURRENT_USER, data);
+  } else {
+    // fallback local + second try without select
+    Object.assign(CURRENT_USER, patch);
+    try{
+      await sb.from('users').update(patch).eq('id', CURRENT_USER.id);
+      const { data: again } = await sb.from('users')
+        .select('xp,level,level_xp,level_xp_needed,crowns')
+        .eq('id', CURRENT_USER.id).maybeSingle();
+      if(again) Object.assign(CURRENT_USER, again);
+    }catch(e2){ console.warn('applyXp retry', e2); }
   }
-  // local fallback
-  Object.assign(CURRENT_USER, patch);
   try{ refreshGameUI(); }catch(e){}
+  try{ if(typeof refreshProfileUI === 'function') refreshProfileUI(); }catch(e){}
   return CURRENT_USER;
 }
 
-/** Grant quest reward once (idempotent via claimed flag) */
+/** Grant quest reward once — XP first, then claimed (so XP is never skipped) */
 async function grantQuestReward(q, row){
   if(!CURRENT_USER || !sb || !q || !row) return false;
   if(row.claimed) return false;
   const done = row.completed || (Number(row.progress)||0) >= (Number(q.target_value)||1);
   if(!done) return false;
   try{
+    // Fresh quest rewards from DB (avoid stale/missing reward_xp)
+    let rewardXp = Number(q.reward_xp);
+    let rewardCrowns = Number(q.reward_crowns);
+    try{
+      const { data: q2 } = await sb.from('quests')
+        .select('id,code,title,reward_xp,reward_crowns')
+        .eq('id', q.id).maybeSingle();
+      if(q2){
+        if(q2.reward_xp != null) rewardXp = Number(q2.reward_xp);
+        if(q2.reward_crowns != null) rewardCrowns = Number(q2.reward_crowns);
+        q = Object.assign({}, q, q2);
+      }
+    }catch(e){}
+    rewardXp = Math.max(0, Math.floor(Number(rewardXp)||0));
+    rewardCrowns = Math.max(0, Math.floor(Number(rewardCrowns)||0));
+
+    // 1) Give XP to total + level bar
+    const beforeXp = Number(CURRENT_USER.xp)||0;
+    const beforeLv = Number(CURRENT_USER.level_xp)||0;
+    await applyXpToCurrentUser(rewardXp, rewardCrowns);
+
+    // 2) Mark claimed only after XP attempt
     const { data: locked, error } = await sb.from('user_quests').update({
       completed: true,
       claimed: true,
       updated_at: new Date().toISOString()
     }).eq('id', row.id).eq('claimed', false).select('*').maybeSingle();
-    if(error || !locked) return false;
-
-    const xp = Math.max(0, Number(q.reward_xp)||0);
-    const crowns = Math.max(0, Number(q.reward_crowns)||0);
-    await applyXpToCurrentUser(xp, crowns);
+    if(error){
+      // still try claim without claimed filter
+      try{
+        await sb.from('user_quests').update({
+          completed: true, claimed: true, updated_at: new Date().toISOString()
+        }).eq('id', row.id);
+      }catch(e2){}
+    }
 
     const title = 'Quest reward';
-    const body = (q.title || 'Quest') + (xp ? (' · +' + xp + ' XP') : '') + (crowns ? (' · +' + crowns + ' crowns') : '');
+    const body = (q.title || 'Quest') + (rewardXp ? (' · +' + rewardXp + ' XP') : '') + (rewardCrowns ? (' · +' + rewardCrowns + ' crowns') : '');
     try{
       await pushNotification(CURRENT_USER.id, 'quest_reward', title, body, {
-        quest_id: q.id, code: q.code, reward_xp: xp, reward_crowns: crowns
+        quest_id: q.id, code: q.code, reward_xp: rewardXp, reward_crowns: rewardCrowns,
+        xp: CURRENT_USER.xp, level_xp: CURRENT_USER.level_xp, level_xp_needed: CURRENT_USER.level_xp_needed
       });
     }catch(e){}
-    try{ toast('🎯 ' + body); }catch(e){}
+    try{
+      toast('🎯 +' + rewardXp + ' XP · ' + (CURRENT_USER.level_xp||0) + '/' + (CURRENT_USER.level_xp_needed||50));
+    }catch(e){}
     try{ refreshNotifBadge(); }catch(e){}
+    try{ refreshGameUI(); }catch(e){}
     return true;
   }catch(e){
     console.warn('grantQuestReward', e);
