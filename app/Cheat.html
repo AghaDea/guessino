@@ -25,6 +25,7 @@ html,body{height:100%;background:#000;overflow:hidden}
 }
 #gzh-panel.open{display:flex}
 #gzh-panel h3{font-size:11px;color:#8ab;margin:0 0 2px;letter-spacing:.04em;text-transform:uppercase}
+#gzh-stats{font-size:11px;color:#9ec;padding:2px 0 0;font-variant-numeric:tabular-nums}
 #gzh-panel .r{display:flex;gap:6px}
 #gzh-panel button{
   flex:1;border:1px solid #2a3038;background:#1a1f27;color:#eee;border-radius:8px;
@@ -48,6 +49,7 @@ html,body{height:100%;background:#000;overflow:hidden}
 </div>
 <div id="gzh-panel">
   <h3>Auto helper</h3>
+  <div id="gzh-stats">Guesses: 0 · Wins: 0</div>
   <div class="r">
     <button type="button" class="go" id="gzh-start">Start</button>
     <button type="button" class="st" id="gzh-stop">Stop</button>
@@ -66,18 +68,15 @@ html,body{height:100%;background:#000;overflow:hidden}
     easy:[0,10000], normal:[10000,500000],
     hard:[500000,1000000], extreme:[1000000,5000000]
   };
-  /* timing — aggressive */
   var POLL_MS = 45;
   var AFTER_GUESS_MS = 40;
-  var AFTER_WIN_MS = 700;
-  var NEXT_ROUND_MS = 350;
 
   var frame = document.getElementById('site');
   var orb = document.getElementById('gzh-orb');
   var pan = document.getElementById('gzh-panel');
   var S = {
     running:false, low:0, high:1e9, tried:Object.create(null),
-    last:null, wins:0, busy:false, lastSeen:'',
+    last:null, wins:0, guesses:0, busy:false, lastSeen:'',
     poll:null, obs:null, winWait:false
   };
 
@@ -90,7 +89,12 @@ html,body{height:100%;background:#000;overflow:hidden}
     e.appendChild(d);
     e.scrollTop = e.scrollHeight;
   }
+  function clearLog(){ document.getElementById('gzh-log').innerHTML = ''; }
   function status(t){ document.getElementById('gzh-st').textContent = t; }
+  function stats(){
+    document.getElementById('gzh-stats').textContent =
+      'Guesses: ' + S.guesses + ' · Wins: ' + S.wins;
+  }
 
   function doc(){
     try{ return frame.contentDocument || frame.contentWindow.document; }catch(e){ return null; }
@@ -109,15 +113,19 @@ html,body{height:100%;background:#000;overflow:hidden}
     if(b && b.dataset && b.dataset.mode) return b.dataset.mode;
     return 'normal';
   }
-  function reset(){
+  function resetBounds(){
     var m = mode(), r = RANGES[m] || RANGES.normal;
     S.low = r[0]; S.high = r[1]; S.tried = Object.create(null); S.last = null;
-    S.lastSeen = ''; S.winWait = false;
+    S.lastSeen = '';
     log('reset ' + m + ' [' + S.low + '-' + S.high + ']');
   }
   function resText(){
     var el = q('#resultLabel') || q('.result-label');
     return el ? (el.textContent || '').trim() : '';
+  }
+  function isWinText(t){
+    t = (t || '').toLowerCase();
+    return t.indexOf('win') >= 0;
   }
   function inGame(){
     var main = q('#mainApp');
@@ -159,44 +167,70 @@ html,body{height:100%;background:#000;overflow:hidden}
     return g;
   }
 
+  /** Wait until You Win text is gone, then start next round */
+  function waitWinGoneThenNext(){
+    S.winWait = true;
+    S.busy = false;
+    status('Waiting for You Win to clear…');
+    var n = 0;
+    var id = setInterval(function(){
+      if(!S.running){ clearInterval(id); S.winWait = false; return; }
+      var t = resText();
+      // cleared or no longer a win message
+      if(!t || !isWinText(t)){
+        clearInterval(id);
+        // small settle so new round target is ready
+        setTimeout(function(){
+          if(!S.running){ S.winWait = false; return; }
+          clearLog();
+          resetBounds();
+          S.winWait = false;
+          status('Next round');
+          fireGuess();
+        }, 120);
+        return;
+      }
+      if(++n > 200){ // safety ~9s
+        clearInterval(id);
+        if(!S.running){ S.winWait = false; return; }
+        clearLog();
+        resetBounds();
+        S.winWait = false;
+        fireGuess();
+      }
+    }, 45);
+  }
+
   function applyFeedback(t){
-    t = (t || '').toLowerCase();
+    t = (t || '').trim();
+    var tl = t.toLowerCase();
     if(!t || S.last == null) return false;
     if(t === S.lastSeen) return false;
 
-    if(t.indexOf('win') >= 0){
+    if(isWinText(tl)){
       S.lastSeen = t;
       S.wins++;
-      log('WIN ' + S.last + ' #' + S.wins);
-      status('Win — next');
+      stats();
+      log('WIN ' + S.last + '  (wins ' + S.wins + ')');
       S.last = null;
-      S.winWait = true;
-      S.busy = false;
-      setTimeout(function(){
-        if(!S.running) return;
-        reset();
-        setTimeout(function(){
-          S.winWait = false;
-          if(S.running) fireGuess();
-        }, NEXT_ROUND_MS);
-      }, AFTER_WIN_MS);
+      waitWinGoneThenNext();
       return true;
     }
-    if(t.indexOf('higher') >= 0 || t.indexOf('↑') >= 0){
+    if(tl.indexOf('higher') >= 0 || tl.indexOf('↑') >= 0){
       S.lastSeen = t;
       S.low = S.last + 1;
       log('↑ higher → ' + S.low);
       S.busy = false;
-      if(S.low > S.high) reset();
+      if(S.low > S.high) resetBounds();
       queueMicrotask(function(){ if(S.running && !S.winWait) fireGuess(); });
       return true;
     }
-    if(t.indexOf('lower') >= 0 || t.indexOf('↓') >= 0){
+    if(tl.indexOf('lower') >= 0 || tl.indexOf('↓') >= 0){
       S.lastSeen = t;
       S.high = S.last - 1;
       log('↓ lower → ' + S.high);
       S.busy = false;
-      if(S.low > S.high) reset();
+      if(S.low > S.high) resetBounds();
       queueMicrotask(function(){ if(S.running && !S.winWait) fireGuess(); });
       return true;
     }
@@ -211,6 +245,8 @@ html,body{height:100%;background:#000;overflow:hidden}
     var g = pick();
     S.tried[g] = 1;
     S.last = g;
+    S.guesses++;
+    stats();
     status('Guess ' + g + '  [' + S.low + '–' + S.high + ']');
     log('try ' + g);
     var ok = typeNum(g);
@@ -219,13 +255,12 @@ html,body{height:100%;background:#000;overflow:hidden}
       S.busy = false;
       return;
     }
-    /* poll result almost immediately */
     var tries = 0;
     var rapid = setInterval(function(){
       if(!S.running){ clearInterval(rapid); return; }
       var t = resText();
       if(applyFeedback(t)){ clearInterval(rapid); return; }
-      if(++tries > 40){ clearInterval(rapid); S.busy = false; }
+      if(++tries > 50){ clearInterval(rapid); S.busy = false; }
     }, AFTER_GUESS_MS);
   }
 
@@ -249,9 +284,7 @@ html,body{height:100%;background:#000;overflow:hidden}
       var t = resText();
       if(t && t !== S.lastSeen) applyFeedback(t);
     });
-    try{
-      S.obs.observe(el, { childList:true, characterData:true, subtree:true, attributes:true });
-    }catch(e){}
+    try{ S.obs.observe(el, { childList:true, characterData:true, subtree:true, attributes:true }); }catch(e){}
   }
   function unbindObserver(){
     if(S.obs){ try{ S.obs.disconnect(); }catch(e){} S.obs = null; }
@@ -259,10 +292,13 @@ html,body{height:100%;background:#000;overflow:hidden}
 
   function start(){
     S.running = true; S.busy = false; S.winWait = false;
+    S.wins = 0; S.guesses = 0;
+    stats();
+    clearLog();
     orb.classList.add('on');
-    reset();
-    status('Auto ON (fast)');
-    log('auto start fast');
+    resetBounds();
+    status('Auto ON');
+    log('auto start');
     bindObserver();
     if(S.poll) clearInterval(S.poll);
     S.poll = setInterval(tick, POLL_MS);
@@ -273,11 +309,11 @@ html,body{height:100%;background:#000;overflow:hidden}
     orb.classList.remove('on');
     if(S.poll){ clearInterval(S.poll); S.poll = null; }
     unbindObserver();
-    status('Stopped');
-    log('auto stop');
+    stats();
+    status('Stopped · Guesses: ' + S.guesses + ' · Wins: ' + S.wins);
+    log('stop · guesses=' + S.guesses + ' wins=' + S.wins);
   }
 
-  /* drag */
   var drag = { on:0, ox:0, oy:0, moved:0 };
   function place(){
     var r = orb.getBoundingClientRect(), pw = 258, ph = pan.offsetHeight || 260;
@@ -319,15 +355,16 @@ html,body{height:100%;background:#000;overflow:hidden}
   document.getElementById('gzh-start').onclick = start;
   document.getElementById('gzh-stop').onclick = stop;
   document.getElementById('gzh-once').onclick = function(){
-    if(!S.running){ S.busy = false; S.winWait = false; if(S.last == null) reset(); fireGuess(); }
+    if(!S.running){ S.busy = false; S.winWait = false; if(S.last == null) resetBounds(); fireGuess(); }
   };
-  document.getElementById('gzh-clr').onclick = function(){ document.getElementById('gzh-log').innerHTML = ''; };
+  document.getElementById('gzh-clr').onclick = clearLog;
 
   frame.addEventListener('load', function(){
     status('Preview ready');
     log('preview loaded');
     if(S.running) bindObserver();
   });
+  stats();
 })();
 </script>
 </body>
