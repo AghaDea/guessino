@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Guessino · Helper</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;background:#0a0a0a;color:#e8e8e8;font:13px/1.4 system-ui,-apple-system,sans-serif;overflow:hidden}
+#frame-wrap{position:fixed;inset:0;z-index:1}
+#frame-wrap iframe{width:100%;height:100%;border:0;background:#000}
+#orb{
+  position:fixed;z-index:99999;width:52px;height:52px;border-radius:50%;
+  left:16px;bottom:96px;cursor:grab;touch-action:none;user-select:none;
+  background:radial-gradient(circle at 35% 30%,#5eb0ff,#1d6fd4 55%,#0a3a7a);
+  box-shadow:0 6px 22px rgba(0,80,180,.45),inset 0 1px 0 rgba(255,255,255,.25);
+  display:grid;place-items:center;border:1px solid rgba(255,255,255,.18);
+  transition:box-shadow .15s;
+}
+#orb:active{cursor:grabbing}
+#orb.on{box-shadow:0 0 0 3px rgba(0,200,120,.45),0 6px 22px rgba(0,180,100,.4)}
+#orb svg{width:22px;height:22px;pointer-events:none}
+#panel{
+  position:fixed;z-index:100000;width:260px;
+  background:#12151a;border:1px solid #2a3038;border-radius:14px;
+  box-shadow:0 16px 48px rgba(0,0,0,.55);padding:12px;
+  display:none;flex-direction:column;gap:8px;
+}
+#panel.open{display:flex}
+#panel h3{font-size:12px;font-weight:700;letter-spacing:.04em;color:#9ab;text-transform:uppercase}
+.row{display:flex;gap:6px;flex-wrap:wrap}
+.row button,.row select{
+  flex:1;min-width:0;border:1px solid #2a3038;background:#1a1f27;color:#e8e8e8;
+  border-radius:8px;padding:8px 6px;font-size:12px;font-weight:600;cursor:pointer
+}
+.row button.primary{background:#1d6fd4;border-color:#2a7de0}
+.row button.danger{background:#3a1518;border-color:#6a2a30;color:#f88}
+.row button:disabled{opacity:.45;cursor:default}
+.row select{appearance:none}
+#status{font-size:11px;color:#8a9;padding:4px 2px}
+#log{
+  height:110px;overflow:auto;background:#0c0e12;border:1px solid #222830;border-radius:8px;
+  padding:6px 8px;font:11px/1.45 ui-monospace,Menlo,monospace;color:#9bc
+}
+#log div{border-bottom:1px solid #181c22;padding:2px 0}
+#cfg{font-size:10px;color:#667;word-break:break-all}
+input.url{
+  width:100%;border:1px solid #2a3038;background:#0c0e12;color:#cde;border-radius:8px;
+  padding:7px 8px;font-size:11px
+}
+</style>
+</head>
+<body>
+<div id="frame-wrap"><iframe id="site" title="site" allow="clipboard-read; clipboard-write"></iframe></div>
+
+<div id="orb" title="Helper">
+  <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/></svg>
+</div>
+
+<div id="panel">
+  <h3>Guessino Helper</h3>
+  <input class="url" id="urlInput" placeholder="Site URL">
+  <div class="row">
+    <button type="button" id="btnLoad">Load</button>
+    <select id="modeSel">
+      <option value="easy">Easy 0–10k</option>
+      <option value="normal" selected>Normal</option>
+      <option value="hard">Hard</option>
+      <option value="extreme">Extreme</option>
+    </select>
+  </div>
+  <div class="row">
+    <button type="button" class="primary" id="btnStart">Start auto</button>
+    <button type="button" class="danger" id="btnStop">Stop</button>
+  </div>
+  <div class="row">
+    <button type="button" id="btnOnce">One guess</button>
+    <button type="button" id="btnClearLog">Clear log</button>
+  </div>
+  <div id="status">Idle · open game page inside preview</div>
+  <div id="log"></div>
+  <div id="cfg">Same-origin required for auto-play</div>
+</div>
+
+<script>
+(function(){
+  /* ========== CONFIG: set your site URL ========== */
+  var DEFAULT_URL = (function(){
+    try{
+      var p = location.pathname || '/';
+      if (/\/Cheat\.html$/i.test(p)) p = p.replace(/\/Cheat\.html$/i, '/');
+      else if (!p.endsWith('/')) p = p.replace(/\/[^/]*$/, '/');
+      return location.origin + p;
+    }catch(e){ return 'https://example.com/'; }
+  })();
+
+  var RANGES = {
+    easy:    [0, 10000],
+    normal:  [10000, 500000],
+    hard:    [500000, 1000000],
+    extreme: [1000000, 5000000]
+  };
+
+  var orb = document.getElementById('orb');
+  var panel = document.getElementById('panel');
+  var frame = document.getElementById('site');
+  var logEl = document.getElementById('log');
+  var statusEl = document.getElementById('status');
+  var urlInput = document.getElementById('urlInput');
+  var modeSel = document.getElementById('modeSel');
+
+  urlInput.value = DEFAULT_URL;
+
+  var state = {
+    running: false,
+    low: 0,
+    high: 10000,
+    tried: Object.create(null),
+    lastGuess: null,
+    wins: 0,
+    timer: null
+  };
+
+  function log(msg){
+    var d = document.createElement('div');
+    var t = new Date();
+    var ts = [t.getHours(),t.getMinutes(),t.getSeconds()].map(function(n){return n<10?'0'+n:''+n}).join(':');
+    d.textContent = ts + '  ' + msg;
+    logEl.appendChild(d);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+  function setStatus(s){ statusEl.textContent = s; }
+
+  function loadSite(){
+    var u = (urlInput.value || '').trim();
+    if (!u) return;
+    frame.src = u;
+    log('Load ' + u);
+    setStatus('Loading site…');
+  }
+  document.getElementById('btnLoad').onclick = loadSite;
+  loadSite();
+
+  /* ---- drag orb ---- */
+  var drag = {on:false, ox:0, oy:0, moved:false};
+  function placePanel(){
+    var r = orb.getBoundingClientRect();
+    var pw = panel.offsetWidth || 260;
+    var ph = panel.offsetHeight || 280;
+    var x = r.left + r.width / 2 - pw / 2;
+    var y = r.top - ph - 10;
+    if (y < 8) y = r.bottom + 10;
+    if (x < 8) x = 8;
+    if (x + pw > innerWidth - 8) x = innerWidth - pw - 8;
+    if (y + ph > innerHeight - 8) y = Math.max(8, innerHeight - ph - 8);
+    panel.style.left = x + 'px';
+    panel.style.top = y + 'px';
+  }
+  function onDown(e){
+    var p = e.touches ? e.touches[0] : e;
+    drag.on = true; drag.moved = false;
+    drag.ox = p.clientX - orb.offsetLeft;
+    drag.oy = p.clientY - orb.offsetTop;
+    e.preventDefault();
+  }
+  function onMove(e){
+    if (!drag.on) return;
+    var p = e.touches ? e.touches[0] : e;
+    var nx = p.clientX - drag.ox;
+    var ny = p.clientY - drag.oy;
+    if (Math.abs(nx - orb.offsetLeft) > 3 || Math.abs(ny - orb.offsetTop) > 3) drag.moved = true;
+    nx = Math.max(0, Math.min(innerWidth - orb.offsetWidth, nx));
+    ny = Math.max(0, Math.min(innerHeight - orb.offsetHeight, ny));
+    orb.style.left = nx + 'px';
+    orb.style.top = ny + 'px';
+    orb.style.bottom = 'auto';
+    if (panel.classList.contains('open')) placePanel();
+  }
+  function onUp(){
+    if (!drag.on) return;
+    var wasDrag = drag.moved;
+    drag.on = false;
+    if (!wasDrag){
+      panel.classList.toggle('open');
+      if (panel.classList.contains('open')) placePanel();
+    }
+  }
+  orb.addEventListener('mousedown', onDown);
+  orb.addEventListener('touchstart', onDown, {passive:false});
+  window.addEventListener('mousemove', onMove);
+  window.addEventListener('touchmove', onMove, {passive:false});
+  window.addEventListener('mouseup', onUp);
+  window.addEventListener('touchend', onUp);
+
+  /* ---- iframe DOM helpers (same-origin) ---- */
+  function doc(){
+    try{ return frame.contentDocument || frame.contentWindow.document; }catch(e){ return null; }
+  }
+  function win(){
+    try{ return frame.contentWindow; }catch(e){ return null; }
+  }
+  function q(sel){
+    var d = doc();
+    return d ? d.querySelector(sel) : null;
+  }
+  function visibleGame(){
+    var main = q('#mainApp');
+    if (main && !main.classList.contains('hidden')) return true;
+    return !!q('.keypad') || !!q('#guessDisplay');
+  }
+  function resultText(){
+    var el = q('#resultLabel') || q('.result-label');
+    return el ? (el.textContent || '').trim() : '';
+  }
+  function isWin(t){
+    t = (t || '').toLowerCase();
+    return t.indexOf('win') >= 0 || t.indexOf('you win') >= 0;
+  }
+  function isHigher(t){
+    t = (t || '').toLowerCase();
+    return t.indexOf('higher') >= 0 || t.indexOf('↑') >= 0;
+  }
+  function isLower(t){
+    t = (t || '').toLowerCase();
+    return t.indexOf('lower') >= 0 || t.indexOf('↓') >= 0;
+  }
+  function detectMode(){
+    var w = win();
+    try{
+      if (w && w.gameMode && RANGES[w.gameMode]) return w.gameMode;
+    }catch(e){}
+    var active = q('#modeTabs button.active') || q('.mode-tabs button.active');
+    if (active && active.dataset && active.dataset.mode) return active.dataset.mode;
+    return modeSel.value || 'normal';
+  }
+  function typeNumber(n){
+    var d = doc();
+    if (!d) return false;
+    var w = win();
+    // prefer app API if exposed
+    try{
+      if (w && typeof w.typedDigits !== 'undefined'){
+        w.typedDigits = String(n);
+        if (typeof w.renderTypedDigits === 'function') w.renderTypedDigits();
+        if (typeof w.submitGuess === 'function'){ w.submitGuess(); return true; }
+      }
+    }catch(e){}
+    // keypad fallback
+    var clearBtn = null, setBtn = null;
+    var buttons = d.querySelectorAll('.keypad button, #keypad button');
+    buttons.forEach(function(b){
+      var t = (b.textContent || '').trim();
+      if (t === 'Clear') clearBtn = b;
+      if (t === 'Set') setBtn = b;
+    });
+    if (clearBtn) clearBtn.click();
+    String(n).split('').forEach(function(ch){
+      buttons.forEach(function(b){
+        if ((b.textContent || '').trim() === ch) b.click();
+      });
+    });
+    if (setBtn){ setBtn.click(); return true; }
+    return false;
+  }
+  function pickGuess(){
+    var mode = detectMode();
+    modeSel.value = mode;
+    var range = RANGES[mode] || RANGES.normal;
+    if (state.low < range[0] || state.high > range[1] || state.low > state.high){
+      state.low = range[0];
+      state.high = range[1];
+      state.tried = Object.create(null);
+    }
+    var lo = state.low, hi = state.high;
+    var g = Math.floor((lo + hi) / 2);
+    var guard = 0;
+    while (state.tried[g] && guard++ < 50){
+      if (g < hi) g++;
+      else if (g > lo) g--;
+      else break;
+    }
+    // prefer unused mid-ish
+    if (state.tried[g]){
+      for (var x = lo; x <= hi; x++){
+        if (!state.tried[x]){ g = x; break; }
+      }
+    }
+    return g;
+  }
+  function resetBounds(){
+    var mode = detectMode();
+    var range = RANGES[mode] || RANGES.normal;
+    state.low = range[0];
+    state.high = range[1];
+    state.tried = Object.create(null);
+    state.lastGuess = null;
+    log('Bounds reset [' + state.low + '–' + state.high + '] mode=' + mode);
+  }
+
+  function step(){
+    if (!state.running) return;
+    var d = doc();
+    if (!d){
+      setStatus('Cannot access iframe (need same origin)');
+      log('Blocked: cross-origin or not loaded');
+      return;
+    }
+    if (!visibleGame()){
+      setStatus('Waiting for game screen…');
+      return;
+    }
+    var txt = resultText();
+    if (state.lastGuess != null && txt){
+      if (isWin(txt)){
+        state.wins++;
+        log('WIN with ' + state.lastGuess + '  (#' + state.wins + ')');
+        setStatus('Win · restarting…');
+        state.lastGuess = null;
+        // wait for new round then reset bounds
+        setTimeout(function(){
+          if (!state.running) return;
+          resetBounds();
+          setTimeout(function(){ if (state.running) doGuess(); }, 900);
+        }, 1800);
+        return;
+      }
+      if (isHigher(txt)){
+        state.low = state.lastGuess + 1;
+        log('Higher → low=' + state.low);
+      } else if (isLower(txt)){
+        state.high = state.lastGuess - 1;
+        log('Lower → high=' + state.high);
+      }
+    }
+    if (state.low > state.high){
+      log('Range collapsed — reset');
+      resetBounds();
+    }
+    doGuess();
+  }
+
+  function doGuess(){
+    if (!state.running && arguments[0] !== 'once') return;
+    var g = pickGuess();
+    state.tried[g] = 1;
+    state.lastGuess = g;
+    setStatus('Guess ' + g + '  [' + state.low + '–' + state.high + ']');
+    log('Try ' + g);
+    var ok = typeNumber(g);
+    if (!ok) log('Could not type number (open Game tab)');
+  }
+
+  function startAuto(){
+    state.running = true;
+    orb.classList.add('on');
+    resetBounds();
+    setStatus('Auto on');
+    log('Auto started');
+    if (state.timer) clearInterval(state.timer);
+    state.timer = setInterval(step, 1400);
+    step();
+  }
+  function stopAuto(){
+    state.running = false;
+    orb.classList.remove('on');
+    if (state.timer){ clearInterval(state.timer); state.timer = null; }
+    setStatus('Stopped');
+    log('Auto stopped');
+  }
+
+  document.getElementById('btnStart').onclick = startAuto;
+  document.getElementById('btnStop').onclick = stopAuto;
+  document.getElementById('btnOnce').onclick = function(){
+    if (!doc()){ log('No iframe access'); return; }
+    if (state.lastGuess == null) resetBounds();
+    doGuess('once');
+  };
+  document.getElementById('btnClearLog').onclick = function(){ logEl.innerHTML = ''; };
+
+  frame.addEventListener('load', function(){
+    setStatus('Site loaded');
+    log('Frame loaded');
+  });
+})();
+</script>
+</body>
+</html>
