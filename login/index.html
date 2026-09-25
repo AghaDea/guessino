@@ -19,11 +19,18 @@
     }
     return path.replace(/\/(app|login|update)\/?$/i, '/');
   }
+  window.__gzSiteUpdateActive = function(row) {
+    if (!row || !row.enabled) return false;
+    if (!row.ends_at) return true; // no date = on until disabled
+    var end = Date.parse(row.ends_at);
+    if (!isFinite(end)) return !!row.enabled;
+    return end > Date.now();
+  };
   window.__gzSiteUpdateFetch = function(cb) {
     var done = false;
     function finish(row) { if (done) return; done = true; try { cb(row || null); } catch (e) {} }
-    var t = setTimeout(function(){ finish(null); }, 4000);
-    try {
+    var t = setTimeout(function(){ finish(null); }, 4500);
+    function fromRest() {
       fetch(SUPABASE_URL + '/rest/v1/site_update?id=eq.1&select=enabled,ends_at,title,message&limit=1', {
         headers: {
           'apikey': SUPABASE_ANON_KEY,
@@ -32,16 +39,54 @@
         }
       }).then(function(r){ return r.ok ? r.json() : []; }).then(function(rows){
         clearTimeout(t);
-        finish(rows && rows[0] ? rows[0] : null);
+        var row = rows && rows[0] ? rows[0] : null;
+        // client-side clear if past (best-effort)
+        if (row && row.enabled && row.ends_at) {
+          var end = Date.parse(row.ends_at);
+          if (isFinite(end) && end <= Date.now()) {
+            row.enabled = false;
+            row.ends_at = null;
+            try {
+              fetch(SUPABASE_URL + '/rest/v1/site_update?id=eq.1', {
+                method: 'PATCH',
+                headers: {
+                  'apikey': SUPABASE_ANON_KEY,
+                  'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
+                  'Content-Type': 'application/json',
+                  'Prefer': 'return=minimal'
+                },
+                body: JSON.stringify({ enabled: false, ends_at: null, updated_at: new Date().toISOString() })
+              }).catch(function(){});
+            } catch (e) {}
+          }
+        }
+        finish(row);
       }).catch(function(){ clearTimeout(t); finish(null); });
-    } catch (e) { clearTimeout(t); finish(null); }
-  };
-  window.__gzSiteUpdateActive = function(row) {
-    if (!row || !row.enabled) return false;
-    if (!row.ends_at) return false;
-    var end = Date.parse(row.ends_at);
-    if (!isFinite(end)) return false;
-    return end > Date.now();
+    }
+    // prefer RPC normalize
+    try {
+      fetch(SUPABASE_URL + '/rest/v1/rpc/site_update_normalize', {
+        method: 'POST',
+        headers: {
+          'apikey': SUPABASE_ANON_KEY,
+          'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        body: '{}'
+      }).then(function(r){ return r.ok ? r.json() : null; }).then(function(data){
+        if (data && data.ok) {
+          clearTimeout(t);
+          finish({
+            enabled: !!data.enabled && !!data.active,
+            ends_at: data.ends_at,
+            title: data.title,
+            message: data.message,
+            _active: !!data.active
+          });
+        } else fromRest();
+      }).catch(function(){ fromRest(); });
+    } catch (e) { fromRest(); }
   };
   window.__gzGoUpdate = function() {
     try { location.replace(baseRoot() + 'update/'); }
@@ -51,6 +96,7 @@
 
 window.__gzSiteUpdateFetch(function(row){ if(window.__gzSiteUpdateActive(row)) window.__gzGoUpdate(); });
 </script>
+  <script src="../Config/load-config.js"></script>
 </head>
 <body>
 
@@ -73,7 +119,21 @@ window.__gzSiteUpdateFetch(function(row){ if(window.__gzSiteUpdateActive(row)) w
       </div>
       <div class="verify-wrap">
         <label>Drag the cut piece onto the checkered hole</label>
-        <div class="puzzle-wrap" id="puzzleCaptcha"><div class="puzzle-board" id="puzzleBoard"><canvas id="puzzleCanvas"></canvas><div class="puzzle-target" id="puzzleTarget"></div><div class="puzzle-piece" id="puzzlePiece"></div></div><div class="puzzle-hint">Put the image piece back into the checkered hole</div><div class="puzzle-status" id="puzzleStatus"></div></div>
+        <div class="puzzle-wrap" id="puzzleCaptcha">
+          <div class="puzzle-head">
+            <label>Security check</label>
+            <button type="button" class="puzzle-refresh" id="puzzleRefreshBtn" title="New puzzle" aria-label="New puzzle">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.1-5.7"/><polyline points="21 3 21 9 15 9"/></svg>
+            </button>
+          </div>
+          <div class="puzzle-board" id="puzzleBoard">
+            <canvas id="puzzleCanvas"></canvas>
+            <div class="puzzle-target" id="puzzleTarget"></div>
+            <div class="puzzle-piece" id="puzzlePiece"></div>
+          </div>
+          <div class="puzzle-hint">Drag the piece into the glowing slot</div>
+          <div class="puzzle-status" id="puzzleStatus"></div>
+        </div>
       </div>
       <button class="btn btn-primary" id="authSubmitBtn">Log In</button>
       <div class="switch-line" id="authSwitchLine">Don't have an account? <a href="#" id="authSwitchLink">Sign up</a></div>
