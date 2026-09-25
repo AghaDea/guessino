@@ -1265,3 +1265,37 @@ html[data-theme="light"] .notif-panel{box-shadow:0 12px 40px rgba(0,0,0,.12);}
 html[data-theme="light"] .modal-bg{background:rgba(15,23,42,.35);}
 html:not([data-theme="light"]) .duel-banner b{color:var(--gold);}
 html:not([data-theme="light"]) .modal-bg{background:rgba(0,0,0,.78);}
+
+/* pc-app-layout — desktop only; mobile layout unchanged */
+@media (min-width:900px){
+  #app{
+    max-width:720px;
+    border-left:1px solid var(--border);
+    border-right:1px solid var(--border);
+  }
+  nav.tabbar{
+    max-width:720px;
+  }
+  .chat-convo{
+    max-width:720px;
+  }
+  main{
+    padding:18px 22px;
+    padding-bottom:calc(100px + env(safe-area-inset-bottom,0px));
+  }
+  header.topbar{
+    padding:14px 20px;
+  }
+  .modal-box{
+    max-width:440px;
+  }
+}
+@media (min-width:1200px){
+  #app{
+    max-width:820px;
+  }
+  nav.tabbar,
+  .chat-convo{
+    max-width:820px;
+  }
+}
