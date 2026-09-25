@@ -1753,7 +1753,7 @@ async function submitGuess(){
     }
     window.__guessBusy = true;
     try{ await registerWin(currentGuessCount, gameMode); }
-    finally{ setTimeout(()=>{ startNewRound(); window.__guessBusy = false; }, 400); }
+    finally{ setTimeout(()=>{ startNewRound(); window.__guessBusy = false; }, 50); }
   } else if(guess < target){
     if(rl){ rl.className = 'result-label show higher'; rl.textContent = '↑ Higher'; }
     guessHistory.push({guess, result:'↑ Higher'});
@@ -6259,7 +6259,7 @@ async function onDuelFinished(room){
   setTimeout(()=>{
     clearDuelLocal(0);
     try{ startNewRound(); }catch(e){}
-  }, 600);
+  }, 100);
 }
 
 async function cancelActiveDuel(){
