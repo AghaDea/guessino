@@ -1328,3 +1328,10 @@ html[data-theme="light"] .chat-convo-header,
 html[data-theme="light"] .chat-input-row{background:#fff!important;border-color:var(--border)!important;}
 html[data-theme="light"] .loading-wrap{background:var(--bg)!important;}
 html[data-theme="light"] .toast{background:#0f172a!important;color:#fff!important;}
+
+
+/* default avatar initials */
+.avatar{display:flex;align-items:center;justify-content:center;font-weight:800;color:#fff;user-select:none}
+.avatar .avatar-letter{line-height:1;font-size:0.42em;font-size:max(13px,0.4em)}
+.avatar.sm .avatar-letter{font-size:12px}
+.avatar.lg .avatar-letter{font-size:32px;letter-spacing:-0.03em}
