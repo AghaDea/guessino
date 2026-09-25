@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Guessino</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;background:#000;overflow:hidden;font-family:system-ui,-apple-system,sans-serif}
+#view{position:fixed;inset:0;z-index:1}
+#view iframe{width:100%;height:100%;border:0;background:#000}
+#gzh-orb{
+  position:fixed;z-index:999999;width:50px;height:50px;border-radius:50%;
+  left:14px;bottom:100px;cursor:grab;touch-action:none;user-select:none;
+  background:linear-gradient(145deg,#4dabff,#1565c0);
+  box-shadow:0 8px 24px rgba(21,101,192,.45);display:grid;place-items:center;
+  border:1px solid rgba(255,255,255,.2);transition:box-shadow .15s,transform .1s
+}
+#gzh-orb.on{box-shadow:0 0 0 3px rgba(0,200,120,.5),0 8px 24px rgba(0,160,90,.35)}
+#gzh-orb:active{cursor:grabbing;transform:scale(.96)}
+#gzh-panel{
+  position:fixed;z-index:1000000;width:272px;display:none;flex-direction:column;gap:8px;
+  background:rgba(16,18,24,.96);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
+  border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:12px 12px 10px;
+  box-shadow:0 20px 50px rgba(0,0,0,.55);color:#e8ecf2;font-size:12px
+}
+#gzh-panel.open{display:flex}
+.gzh-hd{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.gzh-hd b{font-size:12px;letter-spacing:.03em}
+.gzh-hd span{font-size:10px;color:#7a8799;font-weight:600}
+.gzh-stats{
+  display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px
+}
+.gzh-stats i{
+  display:block;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.06);
+  border-radius:10px;padding:7px 6px;text-align:center;font-style:normal
+}
+.gzh-stats strong{display:block;font-size:14px;font-variant-numeric:tabular-nums}
+.gzh-stats em{display:block;font-size:9px;color:#7a8799;font-style:normal;margin-top:2px}
+.gzh-bar{height:3px;background:rgba(255,255,255,.06);border-radius:2px;overflow:hidden}
+.gzh-bar>i{display:block;height:100%;width:0;background:linear-gradient(90deg,#1d9bf0,#4ade80);transition:width .15s}
+.gzh-row{display:flex;gap:6px;align-items:center}
+.gzh-row button,.gzh-row select{
+  flex:1;min-width:0;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.05);
+  color:#e8ecf2;border-radius:9px;padding:8px 6px;font-size:11px;font-weight:650;cursor:pointer
+}
+.gzh-row button.go{background:#1d6fd4;border-color:transparent}
+.gzh-row button.st{background:rgba(244,33,46,.15);border-color:rgba(244,33,46,.25);color:#ff8a90}
+.gzh-row button:disabled{opacity:.4;cursor:default}
+label.sp{flex:1;display:flex;flex-direction:column;gap:4px;font-size:10px;color:#7a8799}
+label.sp input{width:100%;accent-color:#1d9bf0}
+#gzh-st{font-size:11px;color:#8b98a8;min-height:16px}
+#gzh-log{
+  height:100px;overflow:auto;background:rgba(0,0,0,.35);border:1px solid rgba(255,255,255,.05);
+  border-radius:10px;padding:6px 8px;font:10.5px/1.45 ui-monospace,Menlo,monospace;color:#8faabc
+}
+#gzh-log div{padding:2px 0;border-bottom:1px solid rgba(255,255,255,.04)}
+</style>
+</head>
+<body>
+<div id="view"><iframe id="site" title="Guessino" src="index.html"></iframe></div>
+<div id="gzh-orb" title="Helper">
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2"/></svg>
+</div>
+<div id="gzh-panel">
+  <div class="gzh-hd"><b>AUTO HELPER</b><span id="gzh-mode">—</span></div>
+  <div class="gzh-stats">
+    <i><strong id="gzh-g">0</strong><em>Guesses</em></i>
+    <i><strong id="gzh-w">0</strong><em>Wins</em></i>
+    <i><strong id="gzh-a">—</strong><em>Avg/win</em></i>
+  </div>
+  <div class="gzh-bar"><i id="gzh-prog"></i></div>
+  <div class="gzh-row">
+    <button type="button" class="go" id="gzh-start">Start</button>
+    <button type="button" class="st" id="gzh-stop">Stop</button>
+  </div>
+  <div class="gzh-row">
+    <button type="button" id="gzh-once">One</button>
+    <button type="button" id="gzh-pause">Pause</button>
+    <button type="button" id="gzh-clr">Log</button>
+  </div>
+  <div class="gzh-row">
+    <label class="sp">Speed <span id="gzh-spdLab">Fast</span>
+      <input type="range" id="gzh-spd" min="0" max="2" step="1" value="0">
+    </label>
+  </div>
+  <div id="gzh-st">Ready</div>
+  <div id="gzh-log"></div>
+</div>
+<script>
+(function(){
+  var RANGES={easy:[0,10000],normal:[10000,500000],hard:[500000,1000000],extreme:[1000000,5000000]};
+  var SPEEDS=[{n:'Fast',p:40,g:35},{n:'Normal',p:80,g:70},{n:'Safe',p:160,g:140}];
+  var frame=document.getElementById('site'),orb=document.getElementById('gzh-orb'),pan=document.getElementById('gzh-panel');
+  var S={running:0,paused:0,low:0,high:1e9,tried:Object.create(null),last:null,wins:0,guesses:0,busy:0,lastSeen:'',poll:null,obs:null,winWait:0,baseLow:0,baseHigh:1};
+
+  function $(id){return document.getElementById(id)}
+  function spd(){return SPEEDS[+$('gzh-spd').value]||SPEEDS[0]}
+  function log(t){var e=$('gzh-log'),d=document.createElement('div'),n=new Date();
+    d.textContent=[n.getHours(),n.getMinutes(),n.getSeconds()].map(function(x){return x<10?'0'+x:''+x}).join(':')+'  '+t;
+    e.appendChild(d);e.scrollTop=e.scrollHeight}
+  function clearLog(){$('gzh-log').innerHTML=''}
+  function status(t){$('gzh-st').textContent=t}
+  function stats(){
+    $('gzh-g').textContent=S.guesses;$('gzh-w').textContent=S.wins;
+    $('gzh-a').textContent=S.wins?Math.round(S.guesses/S.wins*10)/10:'—';
+    var span=Math.max(1,S.baseHigh-S.baseLow),left=Math.max(0,S.high-S.low);
+    var pct=Math.max(0,Math.min(100,100*(1-left/span)));
+    $('gzh-prog').style.width=pct+'%';
+  }
+  function doc(){try{return frame.contentDocument||frame.contentWindow.document}catch(e){return null}}
+  function win(){try{return frame.contentWindow}catch(e){return null}}
+  function q(s){var d=doc();return d?d.querySelector(s):null}
+  function mode(){
+    var w=win();try{if(w&&w.gameMode&&RANGES[w.gameMode])return w.gameMode}catch(e){}
+    var b=q('#modeTabs button.active')||q('[data-mode].active');
+    if(b&&b.dataset&&b.dataset.mode)return b.dataset.mode;return 'normal'
+  }
+  function goGame(){
+    try{var w=win();if(w&&typeof w.goPage==='function')w.goPage('game')}catch(e){}
+  }
+  function resetBounds(){
+    var m=mode(),r=RANGES[m]||RANGES.normal;
+    S.low=r[0];S.high=r[1];S.baseLow=r[0];S.baseHigh=r[1];
+    S.tried=Object.create(null);S.last=null;S.lastSeen='';
+    $('gzh-mode').textContent=m.toUpperCase();
+    log('range '+m+' ['+S.low+'-'+S.high+']');stats()
+  }
+  function resText(){var el=q('#resultLabel')||q('.result-label');return el?(el.textContent||'').trim():''}
+  function isWin(t){return (t||'').toLowerCase().indexOf('win')>=0}
+  function inGame(){
+    var m=q('#mainApp');if(m&&!m.classList.contains('hidden'))return true;
+    return !!(q('.keypad')||q('#keypad')||q('#guessDisplay'))
+  }
+  function typeNum(n){
+    var w=win(),d=doc();if(!d)return false;
+    try{
+      if(w&&typeof w.typedDigits!=='undefined'){
+        w.typedDigits=String(n);
+        if(typeof w.renderTypedDigits==='function')w.renderTypedDigits();
+        if(typeof w.submitGuess==='function'){w.submitGuess();return true}
+      }
+    }catch(e){}
+    var btns=d.querySelectorAll('.keypad button,#keypad button'),clr=null,set=null;
+    btns.forEach(function(b){var t=(b.textContent||'').trim();if(t==='Clear')clr=b;if(t==='Set')set=b});
+    if(clr)clr.click();
+    String(n).split('').forEach(function(ch){btns.forEach(function(b){if((b.textContent||'').trim()===ch)b.click()})});
+    if(set){set.click();return true}return false
+  }
+  function pick(){
+    var g=(S.low+S.high)>>1,g2=0;
+    while(S.tried[g]&&g2++<120){if(g<S.high)g++;else if(g>S.low)g--;else break}
+    if(S.tried[g])for(var x=S.low;x<=S.high;x++)if(!S.tried[x]){g=x;break}
+    return g
+  }
+  function waitWinGone(){
+    S.winWait=1;S.busy=0;status('Wait You Win clear…');
+    var n=0,id=setInterval(function(){
+      if(!S.running){clearInterval(id);S.winWait=0;return}
+      var t=resText();
+      if(!t||!isWin(t)){
+        clearInterval(id);
+        setTimeout(function(){
+          if(!S.running){S.winWait=0;return}
+          clearLog();resetBounds();S.winWait=0;status('Next round');fireGuess()
+        },100);return
+      }
+      if(++n>220){clearInterval(id);if(!S.running){S.winWait=0;return}clearLog();resetBounds();S.winWait=0;fireGuess()}
+    },40)
+  }
+  function applyFeedback(t){
+    t=(t||'').trim();var tl=t.toLowerCase();
+    if(!t||S.last==null||t===S.lastSeen)return false;
+    if(isWin(tl)){
+      S.lastSeen=t;S.wins++;stats();log('WIN '+S.last);S.last=null;waitWinGone();return true
+    }
+    if(tl.indexOf('higher')>=0||tl.indexOf('↑')>=0){
+      S.lastSeen=t;S.low=S.last+1;log('↑ → '+S.low);S.busy=0;if(S.low>S.high)resetBounds();stats();
+      queueMicrotask(function(){if(S.running&&!S.paused&&!S.winWait)fireGuess()});return true
+    }
+    if(tl.indexOf('lower')>=0||tl.indexOf('↓')>=0){
+      S.lastSeen=t;S.high=S.last-1;log('↓ → '+S.high);S.busy=0;if(S.low>S.high)resetBounds();stats();
+      queueMicrotask(function(){if(S.running&&!S.paused&&!S.winWait)fireGuess()});return true
+    }
+    return false
+  }
+  function fireGuess(){
+    if(!S.running||S.paused||S.busy||S.winWait)return;
+    if(!doc()||!inGame()){status('Open Game tab…');goGame();return}
+    S.busy=1;S.lastSeen='';
+    var g=pick();S.tried[g]=1;S.last=g;S.guesses++;stats();
+    status(g+'  ['+S.low+'–'+S.high+']');log('try '+g);
+    if(!typeNum(g)){log('no keypad');S.busy=0;return}
+    var tries=0,sp=spd(),rapid=setInterval(function(){
+      if(!S.running){clearInterval(rapid);return}
+      if(applyFeedback(resText())){clearInterval(rapid);return}
+      if(++tries>55){clearInterval(rapid);S.busy=0}
+    },sp.g)
+  }
+  function tick(){
+    if(!S.running||S.paused||S.busy||S.winWait)return;
+    var t=resText();
+    if(S.last!=null&&t&&t!==S.lastSeen&&applyFeedback(t))return;
+    if(S.last==null&&inGame())fireGuess()
+  }
+  function bindObs(){
+    unbindObs();var d=doc();if(!d)return;
+    var el=d.querySelector('#resultLabel')||d.querySelector('.result-label');
+    if(!el||!window.MutationObserver)return;
+    S.obs=new MutationObserver(function(){
+      if(!S.running||S.paused||S.winWait)return;
+      var t=resText();if(t&&t!==S.lastSeen)applyFeedback(t)
+    });
+    try{S.obs.observe(el,{childList:1,characterData:1,subtree:1,attributes:1})}catch(e){}
+  }
+  function unbindObs(){if(S.obs){try{S.obs.disconnect()}catch(e){}S.obs=null}}
+  function armPoll(){
+    if(S.poll)clearInterval(S.poll);
+    S.poll=setInterval(tick,spd().p)
+  }
+  function start(){
+    S.running=1;S.paused=0;S.busy=0;S.winWait=0;S.wins=0;S.guesses=0;
+    stats();clearLog();orb.classList.add('on');$('gzh-pause').textContent='Pause';
+    goGame();resetBounds();status('Auto ON');log('start');bindObs();armPoll();fireGuess()
+  }
+  function stop(){
+    S.running=0;S.paused=0;S.busy=0;S.winWait=0;orb.classList.remove('on');
+    if(S.poll){clearInterval(S.poll);S.poll=null}unbindObs();
+    stats();status('Stop · G '+S.guesses+' · W '+S.wins);log('stop g='+S.guesses+' w='+S.wins)
+  }
+  function togglePause(){
+    if(!S.running)return;
+    S.paused=!S.paused;$('gzh-pause').textContent=S.paused?'Resume':'Pause';
+    status(S.paused?'Paused':'Resumed');
+    if(!S.paused&&!S.busy&&!S.winWait)fireGuess()
+  }
+
+  var drag={on:0,ox:0,oy:0,moved:0};
+  function place(){
+    var r=orb.getBoundingClientRect(),pw=272,ph=pan.offsetHeight||300;
+    var x=r.left+r.width/2-pw/2,y=r.top-ph-8;if(y<6)y=r.bottom+8;
+    x=Math.max(6,Math.min(innerWidth-pw-6,x));pan.style.left=x+'px';pan.style.top=y+'px'
+  }
+  function down(e){var p=e.touches?e.touches[0]:e;drag.on=1;drag.moved=0;drag.ox=p.clientX-orb.offsetLeft;drag.oy=p.clientY-orb.offsetTop;e.preventDefault()}
+  function move(e){
+    if(!drag.on)return;var p=e.touches?e.touches[0]:e;
+    var nx=p.clientX-drag.ox,ny=p.clientY-drag.oy;
+    if(Math.abs(nx-orb.offsetLeft)>3||Math.abs(ny-orb.offsetTop)>3)drag.moved=1;
+    orb.style.left=Math.max(0,Math.min(innerWidth-50,nx))+'px';
+    orb.style.top=Math.max(0,Math.min(innerHeight-50,ny))+'px';orb.style.bottom='auto';
+    if(pan.classList.contains('open'))place()
+  }
+  function up(){if(!drag.on)return;var m=drag.moved;drag.on=0;if(!m){pan.classList.toggle('open');if(pan.classList.contains('open'))place()}}
+  orb.addEventListener('mousedown',down);orb.addEventListener('touchstart',down,{passive:false});
+  window.addEventListener('mousemove',move);window.addEventListener('touchmove',move,{passive:false});
+  window.addEventListener('mouseup',up);window.addEventListener('touchend',up);
+
+  $('gzh-start').onclick=start;$('gzh-stop').onclick=stop;$('gzh-pause').onclick=togglePause;
+  $('gzh-once').onclick=function(){if(!S.running){S.busy=0;S.winWait=0;if(S.last==null)resetBounds();fireGuess()}};
+  $('gzh-clr').onclick=clearLog;
+  $('gzh-spd').oninput=function(){$('gzh-spdLab').textContent=spd().n;if(S.running)armPoll()};
+  frame.addEventListener('load',function(){status('Ready');log('preview ok');if(S.running)bindObs()});
+  stats();
+})();
+</script>
+</body>
+</html>
