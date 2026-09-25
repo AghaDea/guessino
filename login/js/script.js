@@ -460,14 +460,21 @@ function puzzleMakeImage(){
   PUZZLE.size=s;c.width=w*2;c.height=h*2;
   const x=c.getContext('2d');x.setTransform(2,0,0,2,0,0);
 
-  // Clean modern abstract art (no night / stars)
-  const themes=[
+  // Abstract art — brighter set on PC only; mobile keeps calmer tones (never night/stars)
+  const isPc = (typeof window !== 'undefined' && window.innerWidth >= 900);
+  const themesPc=[
     {bg:['#e8f1ff','#c7dfff','#9ec5ff'], shapes:['#5b8def','#7aa8ff','#3d6fd4']},
     {bg:['#eefaf3','#c9f0d8','#9ee0b8'], shapes:['#3cb878','#6dd5a0','#2a9a62']},
     {bg:['#fff3e8','#ffd9b8','#ffc091'], shapes:['#f08a3c','#ffb070','#d96b20']},
     {bg:['#f3eefe','#ddd0ff','#c4b0ff'], shapes:['#7b5fd4','#9b82ef','#5c40b8']},
     {bg:['#eef8fb','#c9ebf4','#a0dcec'], shapes:['#2aa7c5','#5ec4db','#1b8eab']}
   ];
+  const themesMobile=[
+    {bg:['#1a1f2a','#243044','#2c3a52'], shapes:['#5b8def','#7aa8ff','#3d6fd4']},
+    {bg:['#1a2420','#243830','#2c4038'], shapes:['#3cb878','#6dd5a0','#2a9a62']},
+    {bg:['#242018','#3a3020','#4a3828'], shapes:['#f08a3c','#ffb070','#d96b20']}
+  ];
+  const themes = isPc ? themesPc : themesMobile;
   const th=themes[Math.floor(Math.random()*themes.length)];
   const g=x.createLinearGradient(0,0,w,h);
   g.addColorStop(0,th.bg[0]);g.addColorStop(.5,th.bg[1]);g.addColorStop(1,th.bg[2]);
