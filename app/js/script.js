@@ -15,9 +15,11 @@
 })();
 
 /* Site update gate — enabled (+ optional ends_at) */
-(function(){
-  var SUPABASE_URL = 'https://ihbsxjgzrhnssluqooqh.supabase.co';
-  var SUPABASE_ANON_KEY = 'sb_publishable_hHyHJI5JkxgLNrXAwZrGWQ_vbD3kdrj';
+(async function(){
+  try{ if(typeof loadGzConfig === 'function') await loadGzConfig(); }catch(e){}
+  var URL = (window.SUPABASE_URL||'');
+  var KEY = (window.SUPABASE_ANON_KEY||'');
+  if(!URL||!KEY) return;
   function baseDir(strip){
     var path=location.pathname||'/';
     if(/\/index\.html$/i.test(path)) path=path.replace(/\/index\.html$/i,'/');
@@ -37,15 +39,14 @@
     try{location.replace(baseDir(strip)+'update/');}catch(e){location.replace('/update/');}
   }
   function check(strip){
-    // normalize RPC first
-    fetch(SUPABASE_URL+'/rest/v1/rpc/site_update_normalize',{
+    fetch(URL+'/rest/v1/rpc/site_update_normalize',{
       method:'POST',
-      headers:{'apikey':SUPABASE_ANON_KEY,'Authorization':'Bearer '+SUPABASE_ANON_KEY,'Content-Type':'application/json'},
+      headers:{'apikey':KEY,'Authorization':'Bearer '+KEY,'Content-Type':'application/json'},
       body:'{}'
     }).then(function(r){return r.ok?r.json():null;}).then(function(data){
       if(data&&data.ok){ if(data.active) goUpdate(strip); return; }
-      return fetch(SUPABASE_URL+'/rest/v1/site_update?id=eq.1&select=enabled,ends_at&limit=1',{
-        headers:{'apikey':SUPABASE_ANON_KEY,'Authorization':'Bearer '+SUPABASE_ANON_KEY}
+      return fetch(URL+'/rest/v1/site_update?id=eq.1&select=enabled,ends_at&limit=1',{
+        headers:{'apikey':KEY,'Authorization':'Bearer '+KEY}
       }).then(function(r){return r.ok?r.json():[];}).then(function(rows){
         if(active(rows&&rows[0])) goUpdate(strip);
       });
@@ -200,13 +201,22 @@ function gzGoLogin(){
 /* =====================================================================
    CONFIG — paste your Supabase project values
    ===================================================================== */
-const SUPABASE_URL = "https://ihbsxjgzrhnssluqooqh.supabase.co";
-const SUPABASE_ANON_KEY = "sb_publishable_hHyHJI5JkxgLNrXAwZrGWQ_vbD3kdrj";
+let SUPABASE_URL = (typeof window !== "undefined" && window.SUPABASE_URL) || "";
+let SUPABASE_ANON_KEY = (typeof window !== "undefined" && window.SUPABASE_ANON_KEY) || "";
 
 let sb = null;
 async function ensureSupabase(){
   if(sb) { try{ setDbWarning(false); }catch(e){} return sb; }
   try{
+    if(typeof loadGzConfig === 'function'){
+      try{
+        const cfg = await loadGzConfig();
+        if(cfg){
+          SUPABASE_URL = cfg.SUPABASE_URL || SUPABASE_URL;
+          SUPABASE_ANON_KEY = cfg.SUPABASE_ANON_KEY || SUPABASE_ANON_KEY;
+        }
+      }catch(e){ console.warn('config', e); }
+    }
     // Wait for CDN script(s); retry a few times if slow network
     for(let attempt=0; attempt<4; attempt++){
       if(typeof supabase!=='undefined' && supabase.createClient) break;
