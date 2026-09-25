@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Service Update</title>
+<script src="../Config/load-config.js"></script>
 <style>
 :root{--bg:#0a0a0a;--fg:#f0f0f0;--muted:#7a7a7a;--line:#1c1c1c;--accent:#2e2e2e}
 *{box-sizing:border-box;margin:0;padding:0}
@@ -29,98 +30,10 @@ button:active{transform:scale(.97)}
   <p id="msg">A quick update is in progress. The page will refresh automatically.</p>
   <div class="countdown" id="timer">--:--:--</div>
   <div class="progress"><div class="bar" id="bar"></div></div>
-  <div class="meta"><span id="metaLeft">Until end</span><span id="syncLabel">sync…</span></div>
+  <div class="meta"><span id="metaLeft">Until end (server)</span><span id="syncLabel">sync…</span></div>
   <button type="button" id="retry">Try now</button>
 </div>
 <script>
-
-(function(){
-  var SUPABASE_URL = 'https://ihbsxjgzrhnssluqooqh.supabase.co';
-  var SUPABASE_ANON_KEY = 'sb_publishable_hHyHJI5JkxgLNrXAwZrGWQ_vbD3kdrj';
-  function baseRoot() {
-    var path = location.pathname || '/';
-    if (/\/index\.html$/i.test(path)) path = path.replace(/\/index\.html$/i, '/');
-    else if (!path.endsWith('/')) {
-      if (/\.[a-zA-Z0-9]+$/.test(path.split('/').pop())) path = path.replace(/\/[^/]*$/, '/');
-      else path = path + '/';
-    }
-    return path.replace(/\/(app|login|update)\/?$/i, '/');
-  }
-  window.__gzSiteUpdateActive = function(row) {
-    if (!row || !row.enabled) return false;
-    if (!row.ends_at) return true; // no date = on until disabled
-    var end = Date.parse(row.ends_at);
-    if (!isFinite(end)) return !!row.enabled;
-    return end > Date.now();
-  };
-  window.__gzSiteUpdateFetch = function(cb) {
-    var done = false;
-    function finish(row) { if (done) return; done = true; try { cb(row || null); } catch (e) {} }
-    var t = setTimeout(function(){ finish(null); }, 4500);
-    function fromRest() {
-      fetch(SUPABASE_URL + '/rest/v1/site_update?id=eq.1&select=enabled,ends_at,title,message&limit=1', {
-        headers: {
-          'apikey': SUPABASE_ANON_KEY,
-          'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
-          'Accept': 'application/json'
-        }
-      }).then(function(r){ return r.ok ? r.json() : []; }).then(function(rows){
-        clearTimeout(t);
-        var row = rows && rows[0] ? rows[0] : null;
-        // client-side clear if past (best-effort)
-        if (row && row.enabled && row.ends_at) {
-          var end = Date.parse(row.ends_at);
-          if (isFinite(end) && end <= Date.now()) {
-            row.enabled = false;
-            row.ends_at = null;
-            try {
-              fetch(SUPABASE_URL + '/rest/v1/site_update?id=eq.1', {
-                method: 'PATCH',
-                headers: {
-                  'apikey': SUPABASE_ANON_KEY,
-                  'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
-                  'Content-Type': 'application/json',
-                  'Prefer': 'return=minimal'
-                },
-                body: JSON.stringify({ enabled: false, ends_at: null, updated_at: new Date().toISOString() })
-              }).catch(function(){});
-            } catch (e) {}
-          }
-        }
-        finish(row);
-      }).catch(function(){ clearTimeout(t); finish(null); });
-    }
-    // prefer RPC normalize
-    try {
-      fetch(SUPABASE_URL + '/rest/v1/rpc/site_update_normalize', {
-        method: 'POST',
-        headers: {
-          'apikey': SUPABASE_ANON_KEY,
-          'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
-          'Content-Type': 'application/json',
-          'Accept': 'application/json'
-        },
-        body: '{}'
-      }).then(function(r){ return r.ok ? r.json() : null; }).then(function(data){
-        if (data && data.ok) {
-          clearTimeout(t);
-          finish({
-            enabled: !!data.enabled && !!data.active,
-            ends_at: data.ends_at,
-            title: data.title,
-            message: data.message,
-            _active: !!data.active
-          });
-        } else fromRest();
-      }).catch(function(){ fromRest(); });
-    } catch (e) { fromRest(); }
-  };
-  window.__gzGoUpdate = function() {
-    try { location.replace(baseRoot() + 'update/'); }
-    catch (e) { location.replace('/update/'); }
-  };
-})();
-
 (function(){
   var titleEl=document.getElementById('title');
   var msgEl=document.getElementById('msg');
@@ -129,9 +42,8 @@ button:active{transform:scale(.97)}
   var metaLeft=document.getElementById('metaLeft');
   var syncLabel=document.getElementById('syncLabel');
   var retry=document.getElementById('retry');
-  var endsAt=0;
-  var indefinite=false;
-  var totalSpan=0;
+  var endsAt=0, indefinite=false, totalSpan=0;
+  var URL='', KEY='';
 
   function pad(n){ n=Math.max(0,n|0); return n<10?'0'+n:''+n; }
   function fmt(ms){
@@ -156,6 +68,12 @@ button:active{transform:scale(.97)}
       else location.replace(baseDir()+'login/');
     }catch(e){ location.replace(baseDir()+'login/'); }
   }
+  function active(row){
+    if(!row||!row.enabled) return false;
+    if(!row.ends_at) return true;
+    var end=Date.parse(row.ends_at);
+    return isFinite(end)&&end>Date.now();
+  }
   function paint(){
     if(indefinite){
       timerEl.textContent='--:--:--';
@@ -163,7 +81,7 @@ button:active{transform:scale(.97)}
       metaLeft.textContent='No end time';
       return;
     }
-    metaLeft.textContent='Until end';
+    metaLeft.textContent='Until end (server)';
     var left=endsAt-Date.now();
     timerEl.textContent=fmt(left);
     if(totalSpan>0){
@@ -172,31 +90,48 @@ button:active{transform:scale(.97)}
     }else bar.style.transform='scaleX(0)';
     if(left<=0 && endsAt>0) syncFromServer();
   }
-  function syncFromServer(){
+  async function fetchRow(){
+    try{
+      var r=await fetch(URL+'/rest/v1/rpc/site_update_normalize',{
+        method:'POST',
+        headers:{'apikey':KEY,'Authorization':'Bearer '+KEY,'Content-Type':'application/json'},
+        body:'{}'
+      });
+      if(r.ok){
+        var data=await r.json();
+        if(data&&data.ok){
+          return {enabled:!!data.active, ends_at:data.ends_at, title:data.title, message:data.message};
+        }
+      }
+    }catch(e){}
+    var r2=await fetch(URL+'/rest/v1/site_update?id=eq.1&select=enabled,ends_at,title,message&limit=1',{
+      headers:{'apikey':KEY,'Authorization':'Bearer '+KEY}
+    });
+    var rows=r2.ok?await r2.json():[];
+    return rows&&rows[0]?rows[0]:null;
+  }
+  async function syncFromServer(){
     syncLabel.textContent='sync…';
-    window.__gzSiteUpdateFetch(function(row){
+    try{
+      if(!URL){ var cfg=await loadGzConfig(); URL=cfg.SUPABASE_URL; KEY=cfg.SUPABASE_ANON_KEY; }
+      var row=await fetchRow();
       syncLabel.textContent='ok';
-      if(!window.__gzSiteUpdateActive(row)){ leave(); return; }
+      if(!active(row)){ leave(); return; }
       if(row.title) titleEl.textContent=row.title;
       if(row.message) msgEl.textContent=row.message;
-      if(!row.ends_at){
-        indefinite=true;
-        endsAt=0;
-        paint();
-        return;
-      }
+      if(!row.ends_at){ indefinite=true; endsAt=0; paint(); return; }
       indefinite=false;
       var end=Date.parse(row.ends_at);
       if(!isFinite(end)){ leave(); return; }
       endsAt=end;
       var span=endsAt-Date.now();
-      if(span>0) totalSpan=Math.max(totalSpan, span);
+      if(span>0) totalSpan=Math.max(totalSpan,span);
       if(!totalSpan) totalSpan=span||1;
       paint();
-    });
+    }catch(e){ syncLabel.textContent='err'; }
   }
   setInterval(paint,1000);
-  setInterval(syncFromServer,100000000000000);
+  setInterval(syncFromServer,15000);
   retry.addEventListener('click',syncFromServer);
   syncFromServer();
 })();
