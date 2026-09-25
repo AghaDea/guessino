@@ -1363,6 +1363,8 @@ async function enterSession(user, opts){
       ]);
     }catch(e){}
     try{ await loadMyClan(true); }catch(e){}
+    try{ refreshNameDisplays(); }catch(e){}
+    try{ refreshGameUI(); }catch(e){}
     try{ ensureUserRealtime(); }catch(e){}
     try{ ensureChatRealtime(); }catch(e){}
     try{ ensureChatFallbackPolling(); }catch(e){}
@@ -1753,7 +1755,7 @@ async function submitGuess(){
     }
     window.__guessBusy = true;
     try{ await registerWin(currentGuessCount, gameMode); }
-    finally{ setTimeout(()=>{ startNewRound(); window.__guessBusy = false; }, 50); }
+    finally{ setTimeout(()=>{ startNewRound(); window.__guessBusy = false; }, 1700); }
   } else if(guess < target){
     if(rl){ rl.className = 'result-label show higher'; rl.textContent = '↑ Higher'; }
     guessHistory.push({guess, result:'↑ Higher'});
@@ -1892,7 +1894,8 @@ async function bumpQuestProgressOnWin(guesses, streak){
 function refreshGameUI(){
   const u = CURRENT_USER; if(!u) return;
   renderAvatar($('gameAvatar'), u);
-  $('gameUname').innerHTML = usernameWithTik(u);
+  attachClanToUser(u);
+  if($('gameUname')) $('gameUname').innerHTML = usernameWithTik(u);
   $('gameLevel').textContent = u.level;
   $('gameLevelTitle').innerHTML = levelTitleHtml(u.level);
   $('gameXpText').textContent = `${u.level_xp}/${u.level_xp_needed}`;
@@ -2454,6 +2457,15 @@ function refreshProfileUI(){
   $('editUsername').value = u.username;
   $('editPassword').value = '';
   $('profLevelTitle').innerHTML = levelTitleHtml(u.level);
+  try{
+    if(u && CURRENT_USER && u.id === CURRENT_USER.id && CURRENT_USER.clan_tag){
+      u.clan_tag = CURRENT_USER.clan_tag;
+      u.clan_color = CURRENT_USER.clan_color;
+      u.clan_id = CURRENT_USER.clan_id;
+    } else if(u){
+      attachClanToUser(u);
+    }
+  }catch(e){}
   const pu = $('profUname');
   if(pu){
     pu.innerHTML = usernameWithTik(u) + (truthyFlag(u.is_owner) ? ' <span class="owner-badge">✦ Boss</span>' : (truthyFlag(u.is_admin) ? ' <span class="admin-badge">Staff</span>' : ''));
@@ -3648,20 +3660,57 @@ async function loadMyClan(force){
   if(!CURRENT_USER || !sb){ MY_CLAN = null; return null; }
   try{
     const { data: mem } = await sb.from('clan_members').select('*').eq('user_id', CURRENT_USER.id).maybeSingle();
-    if(!mem){ MY_CLAN = null; CLAN_CACHE[CURRENT_USER.id] = null; return null; }
+    if(!mem){
+      MY_CLAN = null;
+      CLAN_CACHE[CURRENT_USER.id] = null;
+      CURRENT_USER.clan_tag = null;
+      CURRENT_USER.clan_color = null;
+      CURRENT_USER.clan_id = null;
+      CURRENT_USER.clan_name = null;
+      CURRENT_USER.clan_role = null;
+      try{ refreshNameDisplays(); }catch(e){}
+      return null;
+    }
     const { data: clan } = await sb.from('clans').select('*').eq('id', mem.clan_id).maybeSingle();
-    if(!clan){ MY_CLAN = null; return null; }
+    if(!clan){
+      MY_CLAN = null;
+      CLAN_CACHE[CURRENT_USER.id] = null;
+      CURRENT_USER.clan_tag = null;
+      CURRENT_USER.clan_color = null;
+      CURRENT_USER.clan_id = null;
+      CURRENT_USER.clan_name = null;
+      try{ refreshNameDisplays(); }catch(e){}
+      return null;
+    }
     MY_CLAN = { clan, role: mem.role, rank: memberRank(mem), member_id: mem.id };
     mem.rank = memberRank(mem);
     CLAN_CACHE[CURRENT_USER.id] = { id: clan.id, tag: clan.tag, color: clan.color, name: clan.name };
-    // attach to CURRENT_USER for rendering
     CURRENT_USER.clan_tag = clan.tag;
     CURRENT_USER.clan_color = clan.color;
     CURRENT_USER.clan_id = clan.id;
     CURRENT_USER.clan_name = clan.name;
     CURRENT_USER.clan_role = mem.role;
+    try{ refreshNameDisplays(); }catch(e){}
     return MY_CLAN;
   }catch(e){ console.warn('loadMyClan', e); MY_CLAN = null; return null; }
+}
+
+/** Re-paint username + clan tag everywhere after MY_CLAN loads */
+function refreshNameDisplays(){
+  try{
+    if(!CURRENT_USER) return;
+    attachClanToUser(CURRENT_USER);
+    const u = CURRENT_USER;
+    if($('gameUname')) $('gameUname').innerHTML = usernameWithTik(u);
+    if($('topbarUser')){
+      const tag = u.clan_tag ? ('['+String(u.clan_tag).toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,5)+']') : '';
+      $('topbarUser').textContent = '@' + tag + (u.username||'');
+    }
+    const pu = $('profUname');
+    if(pu){
+      pu.innerHTML = usernameWithTik(u) + (truthyFlag(u.is_owner) ? ' <span class="owner-badge">✦ Boss</span>' : (truthyFlag(u.is_admin) ? ' <span class="admin-badge">Staff</span>' : ''));
+    }
+  }catch(e){}
 }
 
 async function fetchClanForUsers(userIds){
@@ -3692,6 +3741,8 @@ function attachClanToUser(u){
   const c = CLAN_CACHE[u.id];
   if(c){
     u.clan_tag = c.tag; u.clan_color = c.color; u.clan_id = c.id; u.clan_name = c.name;
+  } else if(c === null){
+    u.clan_tag = null; u.clan_color = null; u.clan_id = null; u.clan_name = null;
   }
   return u;
 }
@@ -6259,7 +6310,7 @@ async function onDuelFinished(room){
   setTimeout(()=>{
     clearDuelLocal(0);
     try{ startNewRound(); }catch(e){}
-  }, 100);
+  }, 2200);
 }
 
 async function cancelActiveDuel(){
