@@ -460,50 +460,59 @@ function puzzleMakeImage(){
   PUZZLE.size=s;c.width=w*2;c.height=h*2;
   const x=c.getContext('2d');x.setTransform(2,0,0,2,0,0);
 
-  // Western night / desert background — piece is cut from this image
+  // Clean modern abstract art (no night / stars)
   const themes=[
-    {sky:['#0c0a12','#1a1420','#2a1c14']},
-    {sky:['#0a0e14','#152028','#1e2a22']},
-    {sky:['#120a0a','#241410','#3a2218']},
-    {sky:['#0e0c10','#1c1824','#2a2030']}
+    {bg:['#e8f1ff','#c7dfff','#9ec5ff'], shapes:['#5b8def','#7aa8ff','#3d6fd4']},
+    {bg:['#eefaf3','#c9f0d8','#9ee0b8'], shapes:['#3cb878','#6dd5a0','#2a9a62']},
+    {bg:['#fff3e8','#ffd9b8','#ffc091'], shapes:['#f08a3c','#ffb070','#d96b20']},
+    {bg:['#f3eefe','#ddd0ff','#c4b0ff'], shapes:['#7b5fd4','#9b82ef','#5c40b8']},
+    {bg:['#eef8fb','#c9ebf4','#a0dcec'], shapes:['#2aa7c5','#5ec4db','#1b8eab']}
   ];
   const th=themes[Math.floor(Math.random()*themes.length)];
-  const g=x.createLinearGradient(0,0,0,h);
-  g.addColorStop(0,th.sky[0]);g.addColorStop(.55,th.sky[1]);g.addColorStop(1,th.sky[2]);
+  const g=x.createLinearGradient(0,0,w,h);
+  g.addColorStop(0,th.bg[0]);g.addColorStop(.5,th.bg[1]);g.addColorStop(1,th.bg[2]);
   x.fillStyle=g;x.fillRect(0,0,w,h);
 
-  // mesa / mountain silhouette
-  x.fillStyle='rgba(0,0,0,.38)';
-  x.beginPath();x.moveTo(0,h*0.7);
-  for(let i=0;i<=9;i++){
-    x.lineTo((w/9)*i+(Math.random()*16-8), h*0.52+Math.sin(i*1.4)*20+Math.random()*14);
+  // soft blobs
+  for(let i=0;i<5;i++){
+    const cx=Math.random()*w, cy=Math.random()*h, r=28+Math.random()*50;
+    const rg=x.createRadialGradient(cx,cy,0,cx,cy,r);
+    rg.addColorStop(0, th.shapes[i%3]+'99');
+    rg.addColorStop(1, th.shapes[i%3]+'00');
+    x.fillStyle=rg;
+    x.beginPath();x.arc(cx,cy,r,0,Math.PI*2);x.fill();
   }
-  x.lineTo(w,h);x.lineTo(0,h);x.closePath();x.fill();
-
-  // stars
-  for(let i=0;i<60;i++){
-    x.fillStyle='rgba(232,220,200,'+(0.2+Math.random()*0.55)+')';
-    x.beginPath();x.arc(Math.random()*w,Math.random()*h*0.55,0.4+Math.random()*1.5,0,Math.PI*2);x.fill();
-  }
-  // gold dust
-  for(let i=0;i<35;i++){
-    x.fillStyle='rgba(201,162,39,'+(0.05+Math.random()*0.1)+')';
-    x.beginPath();x.arc(Math.random()*w,Math.random()*h,1+Math.random()*3,0,Math.PI*2);x.fill();
-  }
-  // leather scratches (anti-CV noise)
-  for(let i=0;i<80;i++){
-    x.strokeStyle='rgba(0,0,0,'+(0.04+Math.random()*0.08)+')';
-    x.lineWidth=0.5+Math.random()*1.6;
+  // rounded rectangles
+  for(let i=0;i<4;i++){
+    const rw=30+Math.random()*50, rh=18+Math.random()*36;
+    const rx=Math.random()*(w-rw), ry=Math.random()*(h-rh);
+    x.fillStyle=th.shapes[i%3]+'55';
     x.beginPath();
-    const ax=Math.random()*w,ay=Math.random()*h;
-    x.moveTo(ax,ay);
-    x.quadraticCurveTo(ax+(Math.random()*28-14),ay+(Math.random()*18-9),ax+(Math.random()*36-18),ay+(Math.random()*28-14));
+    const rr=10;
+    x.moveTo(rx+rr,ry);
+    x.arcTo(rx+rw,ry,rx+rw,ry+rh,rr);
+    x.arcTo(rx+rw,ry+rh,rx,ry+rh,rr);
+    x.arcTo(rx,ry+rh,rx,ry,rr);
+    x.arcTo(rx,ry,rx+rw,ry,rr);
+    x.closePath();x.fill();
+  }
+  // thin arcs
+  x.lineWidth=2.5;
+  for(let i=0;i<3;i++){
+    x.strokeStyle=th.shapes[i%3]+'88';
+    x.beginPath();
+    x.arc(Math.random()*w, Math.random()*h, 20+Math.random()*40, Math.random()*Math.PI, Math.random()*Math.PI+1.2);
     x.stroke();
   }
-  // vignette
-  const vg=x.createRadialGradient(w/2,h/2,h*0.15,w/2,h/2,h*0.9);
-  vg.addColorStop(0,'rgba(0,0,0,0)');vg.addColorStop(1,'rgba(0,0,0,.3)');
-  x.fillStyle=vg;x.fillRect(0,0,w,h);
+  // light noise (anti-bot texture, still bright)
+  for(let i=0;i<90;i++){
+    x.fillStyle='rgba(255,255,255,'+(0.04+Math.random()*0.08)+')';
+    x.fillRect(Math.random()*w, Math.random()*h, 1+Math.random()*2, 1+Math.random()*2);
+  }
+  for(let i=0;i<50;i++){
+    x.fillStyle='rgba(0,0,0,'+(0.02+Math.random()*0.04)+')';
+    x.fillRect(Math.random()*w, Math.random()*h, 1, 1);
+  }
 
   const minX=12,maxX=Math.max(12,w-s-12),minY=12,maxY=Math.max(12,h-s-12);
   PUZZLE.targetX=puzzleRand(minX,maxX);PUZZLE.targetY=puzzleRand(minY,maxY);
@@ -518,12 +527,9 @@ function puzzleMakeImage(){
   PUZZLE.pointerType='';PUZZLE.pressureSamples=[];PUZZLE.jitter=0;
   captchaToken=null;captchaTokenExp=0;
 
-  // Checkered hole = empty slot where the piece was cut from
   t.style.left=PUZZLE.targetX+'px';t.style.top=PUZZLE.targetY+'px';
   t.style.width=s+'px';t.style.height=s+'px';
 
-  // Cut the exact image fragment from the captcha canvas at the hole position
-  // Canvas is 2x resolution (setTransform 2), so sample physical pixels
   const scale = 2;
   const pieceCanvas = document.createElement('canvas');
   pieceCanvas.width = s * scale;
@@ -535,7 +541,6 @@ function puzzleMakeImage(){
       PUZZLE.targetX * scale, PUZZLE.targetY * scale, s * scale, s * scale,
       0, 0, s * scale, s * scale
     );
-    // punch hole on main image so it matches "cut out" look under the target overlay
     x.save();
     x.globalCompositeOperation = 'destination-out';
     x.beginPath();
@@ -558,6 +563,7 @@ function puzzleMakeImage(){
   p.style.backgroundSize = '100% 100%';
   p.style.backgroundRepeat = 'no-repeat';
   p.style.top = py+'px';
+  p.style.left = px+'px';
   puzzleSetX(px);
   puzzleStatus('');
 }
