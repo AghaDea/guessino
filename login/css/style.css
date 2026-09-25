@@ -171,8 +171,15 @@ button:disabled{opacity:.5;cursor:default;pointer-events:none;}
 .puzzle-refresh:hover{background:rgba(11,125,218,.12);border-color:rgba(11,125,218,.35);color:var(--text)}
 .puzzle-refresh:active{transform:scale(.94)}
 .puzzle-refresh svg{width:16px;height:16px;display:block}
-.puzzle-board{position:relative;width:100%;height:156px;border-radius:16px;overflow:hidden;background:linear-gradient(145deg,#f0f4fa 0%,#e4ebf5 50%,#dce5f2 100%);border:1px solid rgba(255,255,255,.08);box-shadow:inset 0 1px 0 rgba(255,255,255,.06),inset 0 -8px 24px rgba(0,0,0,.35),0 8px 28px rgba(0,0,0,.25);touch-action:none}
-.puzzle-board::after{content:"";position:absolute;inset:0;pointer-events:none;background:linear-gradient(180deg,rgba(255,255,255,.04),transparent 40%,rgba(0,0,0,.15));z-index:1}
+.puzzle-board{position:relative;width:100%;height:148px;border-radius:12px;overflow:hidden;background:#120e0a;border:1px solid var(--border);box-shadow:inset 0 3px 14px rgba(0,0,0,.55),0 0 0 1px rgba(201,162,39,.1);touch-action:none}
+/* desktop-only board polish */
+@media (min-width:900px){
+  .puzzle-board{height:168px;border-radius:16px;background:linear-gradient(145deg,#f0f4fa 0%,#e4ebf5 50%,#dce5f2 100%);border:1px solid rgba(255,255,255,.08);box-shadow:inset 0 1px 0 rgba(255,255,255,.06),0 8px 28px rgba(0,0,0,.2)}
+  .puzzle-board::after{content:"";position:absolute;inset:0;pointer-events:none;background:linear-gradient(180deg,rgba(255,255,255,.04),transparent 40%,rgba(0,0,0,.08));z-index:1}
+  .puzzle-head{margin-bottom:10px}
+  .puzzle-wrap{max-width:420px}
+}
+
 .puzzle-board canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
 .puzzle-target{position:absolute;border-radius:12px;box-sizing:border-box;pointer-events:none;
   background-color:#1a140e;
@@ -276,3 +283,10 @@ html[data-theme="light"] .puzzle-piece{
 html[data-theme="light"] .loading-wrap{background:var(--bg);}
 html[data-theme="light"] .ban-card{background:var(--bg-elev);}
 html[data-theme="light"] .err-msg{background:rgba(139,26,26,.1);color:#8b1a1a;border-color:rgba(139,26,26,.3);}
+
+/* pc-login-layout — only desktop; mobile unchanged */
+@media (min-width:900px){
+  .auth-wrap{padding:32px 24px}
+  .auth-card{max-width:420px;padding:28px 26px 24px;border-radius:20px}
+  .puzzle-hint{font-size:12px}
+}
