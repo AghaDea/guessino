@@ -1044,15 +1044,26 @@ async function boot(){
       }catch(e2){ DEVICE_ID = 'tmp_'+Date.now(); }
     }
 
-    // 3) Soft bot checks (UNCHANGED logic — only wrapped so boot can continue)
+    // 3) Soft bot checks (never treat anti-cheat as bot — different system)
     try{
       const localUntil = isLocalBotBanned();
       if(localUntil){
         const r = (function(){ try{ return localStorage.getItem('gz_bot_ban_reason')||'automation'; }catch(e){ return 'automation'; }})();
-        try{ await withTimeout(enforceBotServerPunishment(r), 3000); }catch(e){}
-        finished = true;
-        try{ clearTimeout(window.__bootForceTimer); }catch(e){}
-        return;
+        // Legacy mistake: anti-cheat used to write bot keys — clean up and do NOT delete account
+        if(/anti-cheat|anticheat|suspicious win/i.test(String(r))){
+          try{
+            localStorage.removeItem('gz_bot_ban_until');
+            localStorage.removeItem('gz_bot_ban_reason');
+            localStorage.setItem('gz_anticheat_ban_until', String(localUntil));
+            localStorage.setItem('gz_anticheat_ban_reason', String(r));
+          }catch(e){}
+          // Fall through to device-ban check instead of bot punishment
+        } else {
+          try{ await withTimeout(enforceBotServerPunishment(r), 3000); }catch(e){}
+          finished = true;
+          try{ clearTimeout(window.__bootForceTimer); }catch(e){}
+          return;
+        }
       }
       const hard = detectHardBotSignals();
       if(hard.length){
@@ -1161,8 +1172,10 @@ function showLoading(){
 function showDeviceBanScreen(devBan){
   hideAllScreens();
   $('banScreen').classList.remove('hidden');
-  $('banTypeText').textContent = 'Device ban';
-  $('banReasonText').textContent = devBan.reason || 'No reason';
+  const reason = (devBan && devBan.reason) ? String(devBan.reason) : 'No reason';
+  const isAntiCheat = /anti-cheat|anticheat|suspicious win/i.test(reason);
+  $('banTypeText').textContent = isAntiCheat ? 'Device ban (Anti-Cheat)' : 'Device ban';
+  $('banReasonText').textContent = reason;
   $('banUntilText').textContent = devBan.banned_until ? fmtDate(devBan.banned_until) : 'Permanent';
 }
 function showUserBanScreen(user){
@@ -1318,12 +1331,24 @@ async function enterSession(user, opts){
   }
 
   // Post-CAPTCHA bot: device ban 80m + delete account + admin log
+  // Never treat anti-cheat local flags as bot (would delete account)
   try{
     const localUntil = isLocalBotBanned();
     if(localUntil){
-      CURRENT_USER = user;
-      await enforceBotServerPunishment((function(){ try{ return localStorage.getItem('gz_bot_ban_reason')||'automation'; }catch(e){ return 'automation'; }})());
-      return;
+      const r = (function(){ try{ return localStorage.getItem('gz_bot_ban_reason')||'automation'; }catch(e){ return 'automation'; }})();
+      if(/anti-cheat|anticheat|suspicious win/i.test(String(r))){
+        try{
+          localStorage.removeItem('gz_bot_ban_until');
+          localStorage.removeItem('gz_bot_ban_reason');
+          localStorage.setItem('gz_anticheat_ban_until', String(localUntil));
+          localStorage.setItem('gz_anticheat_ban_reason', String(r));
+        }catch(e){}
+        // continue — device ban / user.banned handles anti-cheat
+      } else {
+        CURRENT_USER = user;
+        await enforceBotServerPunishment(r);
+        return;
+      }
     }
     const hard = detectHardBotSignals();
     if(hard.length){
@@ -1860,6 +1885,7 @@ function detectAntiCheat(guesses, modeKey){
 
 /**
  * Apply 24h device ban + admin audit log. Does not award the win.
+ * IMPORTANT: uses its own localStorage keys — never gz_bot_ban_* (those trigger bot enforcement / account delete).
  */
 async function applyAntiCheatBan(flag){
   if(!flag || !flag.flagged) return;
@@ -1869,21 +1895,24 @@ async function applyAntiCheatBan(flag){
   try{ did = DEVICE_ID || localStorage.getItem('gz_device_id') || null; }catch(e){ did = DEVICE_ID || null; }
   const uid = CURRENT_USER ? CURRENT_USER.id : null;
   const uname = CURRENT_USER ? CURRENT_USER.username : null;
+  const reasonFull = ANTI_CHEAT_REASON + ' (' + (flag.reason || 'suspicious') + ')';
 
-  // Local soft lock so UI stops immediately
+  // Local anti-cheat lock only (NOT bot keys — bot path deletes accounts)
   try{
-    localStorage.setItem('gz_bot_ban_until', String(untilMs));
-    localStorage.setItem('gz_bot_ban_reason', ANTI_CHEAT_REASON);
+    localStorage.setItem('gz_anticheat_ban_until', String(untilMs));
+    localStorage.setItem('gz_anticheat_ban_reason', reasonFull);
     localStorage.removeItem('gz_user_id');
+    // Clear any accidental bot-ban keys so boot never treats this as a bot
+    localStorage.removeItem('gz_bot_ban_until');
+    localStorage.removeItem('gz_bot_ban_reason');
   }catch(e){}
 
   if(sb){
-    // Device ban 24 hours
     if(did){
       try{
         await sb.from('banned_devices').upsert({
           device_id: did,
-          reason: ANTI_CHEAT_REASON + ' (' + (flag.reason || 'suspicious') + ')',
+          reason: reasonFull,
           banned_until: untilIso,
           banned_at: new Date().toISOString(),
           banned_by: null,
@@ -1891,19 +1920,17 @@ async function applyAntiCheatBan(flag){
         });
       }catch(e){ console.warn('anti-cheat device ban', e); }
     }
-    // Soft-ban the account for the same window (so they cannot just re-login on same device)
     if(uid){
       try{
         await sb.from('users').update({
           banned: true,
           ban_type: 'device',
-          ban_reason: ANTI_CHEAT_REASON,
+          ban_reason: reasonFull,
           ban_until: untilIso,
           banned_at: new Date().toISOString()
         }).eq('id', uid);
       }catch(e){ console.warn('anti-cheat user ban', e); }
     }
-    // Admin audit log (English)
     try{
       await sb.from('audit_log').insert({
         actor_id: null,
@@ -1925,21 +1952,19 @@ async function applyAntiCheatBan(flag){
   }
 
   CURRENT_USER = null;
-  // Show clear English ban screen
   try{
     hideAllScreens();
     if($('banScreen')){
       $('banScreen').classList.remove('hidden');
       if($('banTypeText')) $('banTypeText').textContent = 'Device ban (Anti-Cheat)';
-      if($('banReasonText')) $('banReasonText').textContent = ANTI_CHEAT_REASON + ' — ' + String(flag.reason || 'suspicious pattern');
+      if($('banReasonText')) $('banReasonText').textContent = reasonFull;
       if($('banUntilText')) $('banUntilText').textContent = fmtDate(untilIso) + ' (24 hours)';
     } else {
-      // Fallback full-page message
       document.documentElement.style.pointerEvents = 'none';
       document.documentElement.innerHTML = '<body style="margin:0;background:#0a0505;color:#f5e6d0;font-family:Tahoma,Arial,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;text-align:center;padding:24px"><div style="max-width:440px"><div style="font-size:56px;margin-bottom:12px">🛡️</div><div style="font-size:20px;font-weight:900;line-height:1.5;color:#ff6b6b;margin-bottom:14px">Anti-Cheat: Device Banned</div><div style="font-size:14px;color:#c9a227;margin-bottom:8px">Your device has been temporarily banned for 24 hours.</div><div style="font-size:13px;color:#9a8b72;line-height:1.65">Suspicious win pattern was detected (too fast or unnatural rate). Fair play is required.<br><br>Ban ends: '+escapeHtml(fmtDate(untilIso))+'<br>Reason code: '+escapeHtml(String(flag.reason||'suspicious'))+'</div></div></body>';
     }
   }catch(e){}
-  toast('Anti-cheat: device banned for 24 hours');
+  try{ toast('Anti-cheat: device banned for 24 hours'); }catch(e){}
 }
 
 async function registerWin(guesses, modeKey){
@@ -2948,7 +2973,16 @@ async function loadChatUsers(){
 async function applyLiveUserUpdate(row){
   if(!row || !CURRENT_USER || row.id !== CURRENT_USER.id) return;
   const prev = CURRENT_USER;
-  CURRENT_USER = { ...CURRENT_USER, ...row };
+  // Preserve client-only clan fields (users table has no clan_tag)
+  const keepClan = {
+    clan_tag: prev.clan_tag,
+    clan_color: prev.clan_color,
+    clan_id: prev.clan_id,
+    clan_name: prev.clan_name,
+    clan_role: prev.clan_role,
+    _clan: prev._clan
+  };
+  CURRENT_USER = { ...CURRENT_USER, ...row, ...keepClan };
 
   // Ban took effect while online — or auto-clear if expired
   if(row.banned){
@@ -2967,7 +3001,6 @@ async function applyLiveUserUpdate(row){
       CURRENT_USER.ban_type = null;
       CURRENT_USER.ban_reason = null;
       CURRENT_USER.ban_until = null;
-      // if currently on ban screen, go to app
       try{
         if($('banScreen') && !$('banScreen').classList.contains('hidden')){
           hideAllScreens();
@@ -2995,14 +3028,12 @@ async function applyLiveUserUpdate(row){
     toast('Username updated');
   }
 
-  // Live UI refresh
+  // Live UI refresh (keep clan tag on topbar / game name)
   try{ refreshGameUI(); }catch(e){}
+  try{ refreshNameDisplays(); }catch(e){}
   try{
     if($('pageProfile') && !$('pageProfile').classList.contains('hidden')) refreshProfileUI();
   }catch(e){}
-  if($('topbarUser') && CURRENT_USER.username){
-    $('topbarUser').textContent = '@' + CURRENT_USER.username;
-  }
 }
 
 async function syncCurrentUserFromServer(){
@@ -3965,9 +3996,14 @@ function validateClanTag(t){
 }
 
 async function loadMyClan(force){
-  if(!CURRENT_USER || !sb){ MY_CLAN = null; return null; }
+  if(!CURRENT_USER || !sb){ return MY_CLAN; }
   try{
-    const { data: mem } = await sb.from('clan_members').select('*').eq('user_id', CURRENT_USER.id).maybeSingle();
+    const { data: mem, error: memErr } = await sb.from('clan_members').select('*').eq('user_id', CURRENT_USER.id).maybeSingle();
+    // Network / RLS error → keep previous clan state (prevents tag flicker)
+    if(memErr){
+      console.warn('loadMyClan mem', memErr);
+      return MY_CLAN;
+    }
     if(!mem){
       MY_CLAN = null;
       CLAN_CACHE[CURRENT_USER.id] = null;
@@ -3979,7 +4015,11 @@ async function loadMyClan(force){
       try{ refreshNameDisplays(); }catch(e){}
       return null;
     }
-    const { data: clan } = await sb.from('clans').select('*').eq('id', mem.clan_id).maybeSingle();
+    const { data: clan, error: clanErr } = await sb.from('clans').select('*').eq('id', mem.clan_id).maybeSingle();
+    if(clanErr){
+      console.warn('loadMyClan clan', clanErr);
+      return MY_CLAN;
+    }
     if(!clan){
       MY_CLAN = null;
       CLAN_CACHE[CURRENT_USER.id] = null;
@@ -4000,7 +4040,11 @@ async function loadMyClan(force){
     CURRENT_USER.clan_role = mem.role;
     try{ refreshNameDisplays(); }catch(e){}
     return MY_CLAN;
-  }catch(e){ console.warn('loadMyClan', e); MY_CLAN = null; return null; }
+  }catch(e){
+    // Never wipe clan on transient errors — keeps [TAG] stable
+    console.warn('loadMyClan', e);
+    return MY_CLAN;
+  }
 }
 
 /** Re-paint username + clan tag everywhere after MY_CLAN loads */
@@ -4046,12 +4090,20 @@ async function fetchClanForUsers(userIds){
 
 function attachClanToUser(u){
   if(!u || !u.id) return u;
-  const c = CLAN_CACHE[u.id];
+  let c = CLAN_CACHE[u.id];
+  // Prefer live MY_CLAN for self (stable, avoids flicker while cache is empty)
+  if(CURRENT_USER && u.id === CURRENT_USER.id && MY_CLAN && MY_CLAN.clan){
+    const mc = MY_CLAN.clan;
+    c = { id: mc.id, tag: mc.tag, color: mc.color, name: mc.name };
+    CLAN_CACHE[u.id] = c;
+  }
   if(c){
     u.clan_tag = c.tag; u.clan_color = c.color; u.clan_id = c.id; u.clan_name = c.name;
   } else if(c === null){
+    // Only clear when we positively know there is no clan
     u.clan_tag = null; u.clan_color = null; u.clan_id = null; u.clan_name = null;
   }
+  // if c === undefined → leave existing u.clan_* untouched
   return u;
 }
 
