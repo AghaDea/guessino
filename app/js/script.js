@@ -887,17 +887,37 @@ function isLocalBotBanned(){
   }catch(e){ return 0; }
 }
 
-function showFullBotBanOverlay(reason){
-  const until = isLocalBotBanned();
-  const mins = until ? Math.max(1, Math.ceil((until - Date.now()) / 60000)) : 80;
+function clearLocalBotBan(){
   try{
-    document.documentElement.style.pointerEvents = 'none';
-    document.documentElement.innerHTML = '<body style="margin:0;background:#0a0505;color:#f5e6d0;font-family:Tahoma,Arial,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;text-align:center;padding:24px"><div style="max-width:420px"><div style="font-size:56px;margin-bottom:12px">🚫</div><div style="font-size:20px;font-weight:900;line-height:1.55;color:#ff6b6b;margin-bottom:14px">'+GZ_BOT_BAN_MSG+'</div><div style="font-size:14px;color:#c9a227;margin-bottom:8px">محرومیت موقت: حدود '+mins+' دقیقه باقی مانده</div><div style="font-size:12px;color:#9a8b72;line-height:1.6">ربات تشخیص داده شد. تا پایان محرومیت هیچ گزینه‌ای فعال نیست.<br>دلیل: '+String(reason||'automation').replace(/[<>&]/g,'')+'</div></div></body>';
+    localStorage.removeItem('gz_bot_ban_until');
+    localStorage.removeItem('gz_bot_ban_reason');
   }catch(e){}
 }
 
+function showFullBotBanOverlay(reason, untilMs){
+  const until = untilMs || isLocalBotBanned() || (Date.now() + GZ_BOT_BAN_MS);
+  const mins = Math.max(1, Math.ceil((until - Date.now()) / 60000));
+  try{
+    document.documentElement.style.pointerEvents = 'none';
+    document.documentElement.innerHTML = '<body style="margin:0;background:#0a0505;color:#f5e6d0;font-family:Tahoma,Arial,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;text-align:center;padding:24px"><div style="max-width:420px"><div style="font-size:56px;margin-bottom:12px">🚫</div><div style="font-size:20px;font-weight:900;line-height:1.55;color:#ff6b6b;margin-bottom:14px">'+GZ_BOT_BAN_MSG+'</div><div style="font-size:14px;color:#c9a227;margin-bottom:8px">Temporary ban: about '+mins+' minutes left</div><div style="font-size:12px;color:#9a8b72;line-height:1.6">Automation detected. No actions work until the ban ends.<br>This is a temporary 80-minute device ban (stored in banned_devices).<br>Reason: '+String(reason||'automation').replace(/[<>&']/g,'')+'</div></div></body>';
+  }catch(e){}
+}
+
+/**
+ * Confirmed bot → delete account + 80-minute device ban in banned_devices.
+ * Source of truth for the temp ban = banned_devices table.
+ * Account is removed so the bot cannot keep playing; device stays blocked 80 min.
+ */
 async function enforceBotServerPunishment(reason){
   reason = String(reason || 'automation');
+  // Never treat anti-cheat as bot
+  if(/anti-cheat|anticheat|suspicious win/i.test(reason)){
+    clearLocalBotBan();
+    return;
+  }
+  if(!DEVICE_ID){
+    try{ await initDevice(); }catch(e){}
+  }
   const untilMs = Date.now() + GZ_BOT_BAN_MS;
   const untilIso = new Date(untilMs).toISOString();
   let did = null;
@@ -909,18 +929,21 @@ async function enforceBotServerPunishment(reason){
     else { uid = localStorage.getItem('gz_user_id') || null; }
   }catch(e){}
 
+  // Local cache mirrors server until (DB remains authority)
   try{
     localStorage.setItem('gz_bot_ban_until', String(untilMs));
     localStorage.setItem('gz_bot_ban_reason', reason);
     localStorage.removeItem('gz_user_id');
   }catch(e){}
 
+  let accountDeleted = false;
   if(sb){
+    // 1) Device ban — must persist 80 minutes in banned_devices
     if(did){
       try{
         await sb.from('banned_devices').upsert({
           device_id: did,
-          reason: GZ_BOT_DEVICE_REASON,
+          reason: GZ_BOT_DEVICE_REASON + ' [' + reason + ']',
           banned_until: untilIso,
           banned_at: new Date().toISOString(),
           banned_by: null,
@@ -928,9 +951,22 @@ async function enforceBotServerPunishment(reason){
         });
       }catch(e){ console.warn('bot device ban', e); }
     }
+    // 2) Confirmed bot → delete account (and device rows for that user)
     if(uid){
       try{ await sb.from('devices').delete().eq('user_id', uid); }catch(e){}
-      try{ await sb.from('users').delete().eq('id', uid); }catch(e){
+      try{
+        const { error } = await sb.from('users').delete().eq('id', uid);
+        if(!error) accountDeleted = true;
+        else {
+          // Fallback soft-ban if delete blocked by RLS/FK
+          try{
+            await sb.from('users').update({
+              banned: true, ban_type: 'device', ban_reason: GZ_BOT_DEVICE_REASON,
+              ban_until: untilIso, banned_at: new Date().toISOString()
+            }).eq('id', uid);
+          }catch(e2){}
+        }
+      }catch(e){
         try{
           await sb.from('users').update({
             banned: true, ban_type: 'device', ban_reason: GZ_BOT_DEVICE_REASON,
@@ -948,10 +984,11 @@ async function enforceBotServerPunishment(reason){
         target_username: uname,
         target_device_id: did,
         details: {
-          source: 'app_post_captcha',
+          source: 'app_bot_gate',
           reason: reason,
           banned_until: untilIso,
-          account_deleted: !!uid,
+          ban_duration_minutes: 80,
+          account_deleted: accountDeleted,
           note: GZ_BOT_AUDIT_NOTE,
           device_reason: GZ_BOT_DEVICE_REASON
         }
@@ -960,7 +997,53 @@ async function enforceBotServerPunishment(reason){
   }
 
   CURRENT_USER = null;
-  showFullBotBanOverlay(GZ_BOT_DEVICE_REASON);
+  showFullBotBanOverlay(reason, untilMs);
+}
+
+/**
+ * Reconcile local bot ban with banned_devices (source of truth).
+ * - Active row → keep ban, sync remaining time
+ * - Expired row → delete from table + clear local
+ * - Missing from table → clear local (wrong/stale local ban or expired already cleaned)
+ * Returns active ban row or null.
+ */
+async function reconcileBotBanWithServer(){
+  if(!DEVICE_ID){
+    try{ await initDevice(); }catch(e){}
+  }
+  if(!sb || !DEVICE_ID){
+    const localUntil = isLocalBotBanned();
+    if(localUntil) return { banned_until: new Date(localUntil).toISOString(), reason: 'local', _localOnly: true };
+    return null;
+  }
+  try{
+    const { data: row, error } = await sb.from('banned_devices').select('*').eq('device_id', DEVICE_ID).maybeSingle();
+    if(error){
+      console.warn('reconcile bot ban', error);
+      const localUntil = isLocalBotBanned();
+      return localUntil ? { banned_until: new Date(localUntil).toISOString(), reason: 'local_cache', _localOnly: true } : null;
+    }
+    if(!row){
+      // Not in banned_devices → lift temporary local bot ban
+      clearLocalBotBan();
+      return null;
+    }
+    const untilMs = row.banned_until ? new Date(row.banned_until).getTime() : 0;
+    if(!untilMs || untilMs <= Date.now()){
+      try{ await sb.from('banned_devices').delete().eq('device_id', DEVICE_ID); }catch(e){}
+      clearLocalBotBan();
+      return null;
+    }
+    try{
+      localStorage.setItem('gz_bot_ban_until', String(untilMs));
+      localStorage.setItem('gz_bot_ban_reason', row.reason || 'automation');
+    }catch(e){}
+    return row;
+  }catch(e){
+    console.warn('reconcileBotBanWithServer', e);
+    const localUntil = isLocalBotBanned();
+    return localUntil ? { banned_until: new Date(localUntil).toISOString(), reason: 'local_cache', _localOnly: true } : null;
+  }
 }
 
 async function withTimeout(promise, ms){
@@ -1044,39 +1127,38 @@ async function boot(){
       }catch(e2){ DEVICE_ID = 'tmp_'+Date.now(); }
     }
 
-    // 3) Soft bot checks (never treat anti-cheat as bot — different system)
+    // 3) Hard bot signals only → delete account + 80m banned_devices
     try{
-      const localUntil = isLocalBotBanned();
-      if(localUntil){
-        const r = (function(){ try{ return localStorage.getItem('gz_bot_ban_reason')||'automation'; }catch(e){ return 'automation'; }})();
-        // Legacy mistake: anti-cheat used to write bot keys — clean up and do NOT delete account
-        if(/anti-cheat|anticheat|suspicious win/i.test(String(r))){
-          try{
-            localStorage.removeItem('gz_bot_ban_until');
-            localStorage.removeItem('gz_bot_ban_reason');
-            localStorage.setItem('gz_anticheat_ban_until', String(localUntil));
-            localStorage.setItem('gz_anticheat_ban_reason', String(r));
-          }catch(e){}
-          // Fall through to device-ban check instead of bot punishment
-        } else {
-          try{ await withTimeout(enforceBotServerPunishment(r), 3000); }catch(e){}
-          finished = true;
-          try{ clearTimeout(window.__bootForceTimer); }catch(e){}
-          return;
-        }
-      }
       const hard = detectHardBotSignals();
       if(hard.length){
-        try{ await withTimeout(enforceBotServerPunishment(hard.join(',')), 3000); }catch(e){}
+        try{ await withTimeout(enforceBotServerPunishment(hard.join(',')), 4000); }catch(e){}
         finished = true;
         try{ clearTimeout(window.__bootForceTimer); }catch(e){}
         return;
       }
     }catch(e){ console.warn('bot boot', e); }
 
-    // 4) Device ban
+    // 4) banned_devices is source of truth (80m bot ban / anti-cheat / admin bans)
+    // - If not in table or expired → clear local temp ban and continue
+    // - If active → show ban screen (bot overlay vs device screen by reason)
     try{
-      const devBan = await withTimeout(getActiveDeviceBan(), 3000);
+      const reconciled = await withTimeout(reconcileBotBanWithServer(), 3500);
+      if(reconciled && reconciled.banned_until && new Date(reconciled.banned_until) > new Date()){
+        finished = true;
+        try{ clearTimeout(window.__bootForceTimer); }catch(e){}
+        const reason = String(reconciled.reason || '');
+        const isBot = /ربات|bot|webdriver|toolkit|cdc|automation|phantom|playwright|selenium/i.test(reason)
+          || !!isLocalBotBanned();
+        if(isBot && !/anti-cheat|anticheat|suspicious win/i.test(reason)){
+          const untilMs = new Date(reconciled.banned_until).getTime();
+          showFullBotBanOverlay(reason, untilMs);
+        } else {
+          showDeviceBanScreen(reconciled);
+        }
+        return;
+      }
+      // Also check generic device ban path (covers rows reconcile might miss)
+      const devBan = await withTimeout(getActiveDeviceBan(), 2500);
       if(devBan){
         finished = true;
         try{ clearTimeout(window.__bootForceTimer); }catch(e){}
@@ -1330,30 +1412,23 @@ async function enterSession(user, opts){
     }
   }
 
-  // Post-CAPTCHA bot: device ban 80m + delete account + admin log
-  // Never treat anti-cheat local flags as bot (would delete account)
+  // Post-CAPTCHA: hard bot only → delete account + 80m banned_devices
+  // Local-only stale bans are cleared by reconcile (table is authority)
   try{
-    const localUntil = isLocalBotBanned();
-    if(localUntil){
-      const r = (function(){ try{ return localStorage.getItem('gz_bot_ban_reason')||'automation'; }catch(e){ return 'automation'; }})();
-      if(/anti-cheat|anticheat|suspicious win/i.test(String(r))){
-        try{
-          localStorage.removeItem('gz_bot_ban_until');
-          localStorage.removeItem('gz_bot_ban_reason');
-          localStorage.setItem('gz_anticheat_ban_until', String(localUntil));
-          localStorage.setItem('gz_anticheat_ban_reason', String(r));
-        }catch(e){}
-        // continue — device ban / user.banned handles anti-cheat
-      } else {
-        CURRENT_USER = user;
-        await enforceBotServerPunishment(r);
-        return;
-      }
-    }
     const hard = detectHardBotSignals();
     if(hard.length){
       CURRENT_USER = user;
       await enforceBotServerPunishment(hard.join(','));
+      return;
+    }
+    const reconciled = await withTimeout(reconcileBotBanWithServer(), 3000);
+    if(reconciled && reconciled.banned_until && new Date(reconciled.banned_until) > new Date()){
+      const reason = String(reconciled.reason || '');
+      if(/anti-cheat|anticheat|suspicious win/i.test(reason)){
+        showDeviceBanScreen(reconciled);
+      } else {
+        showFullBotBanOverlay(reason, new Date(reconciled.banned_until).getTime());
+      }
       return;
     }
   }catch(e){ console.warn('bot enforce session', e); }
