@@ -590,6 +590,8 @@ let modalTargetUser = null;
 let pendingBanType = null;
 let guessHistory = [];
 let gameMode = localStorage.getItem('gz_game_mode') || 'normal';
+let roundStartTime = 0;
+let recentWinTimestamps = []; // anti-cheat: recent win times (ms)
 
 const GAME_MODES = {
   easy:    { min:0,       max:10000,   label:'0 – 10,000',          xpBase:18, xpMin:8,  xpStep:2 },
@@ -709,6 +711,7 @@ async function loadAuditLog(){
     anti_bot: 'مسدودسازی ضد ربات',
     anti_bot_ban_device: 'ضد ربات: بن دستگاه + حذف اکانت',
     anti_bot_delete_user: 'ضد ربات: حذف اکانت',
+    anti_cheat: 'Anti-cheat: device banned (24h)',
     signup: 'ثبت‌نام جدید'
   };
   box.innerHTML = data.map(r=>{
@@ -722,6 +725,8 @@ async function loadAuditLog(){
         if(d.ban_type) extra += ' · ' + escapeHtml(String(d.ban_type));
         if(d.champion) extra += ' · champ @' + escapeHtml(String(d.champion));
         if(d.week_key) extra += ' · ' + escapeHtml(String(d.week_key));
+        if(d.ban_duration_hours) extra += ' · ' + escapeHtml(String(d.ban_duration_hours)) + 'h';
+        if(d.detection && d.detection.elapsed_ms != null) extra += ' · ' + escapeHtml(String(d.detection.elapsed_ms)) + 'ms / ' + escapeHtml(String(d.detection.guesses||'?')) + 'g';
       }
     }catch(e){}
     return `<div class="audit-row">
@@ -1697,6 +1702,7 @@ function startNewRound(){
   currentGuessCount = 0;
   typedDigits = '';
   guessHistory = [];
+  roundStartTime = Date.now();
   renderTypedDigits();
   renderGuessHistory();
   $('statThisGuesses').textContent = '0';
@@ -1794,9 +1800,161 @@ async function submitGuess(){
   }
 }
 
+/* ========== ANTI-CHEAT SYSTEM v1.0 — fair, strict, English ========== */
+const ANTI_CHEAT_BAN_MS = 24 * 60 * 60 * 1000; // 24 hours
+const ANTI_CHEAT_REASON = 'Anti-cheat: suspicious win pattern detected';
+
+/**
+ * Detect unrealistic wins (too fast / too many in short window).
+ * Returns { flagged: boolean, reason: string, details: object } or null if clean.
+ */
+function detectAntiCheat(guesses, modeKey){
+  const now = Date.now();
+  const elapsed = roundStartTime ? (now - roundStartTime) : 0;
+  const g = Math.max(1, Number(guesses) || 1);
+  const mode = modeKey || gameMode || 'normal';
+  const details = {
+    guesses: g,
+    elapsed_ms: elapsed,
+    mode: mode,
+    target: currentTarget,
+    timestamp: new Date().toISOString()
+  };
+
+  // 1) Impossible human speed: any win under 1.2s
+  if(elapsed > 0 && elapsed < 1200){
+    return { flagged: true, reason: 'win_too_fast_absolute', details: Object.assign({}, details, { threshold_ms: 1200 }) };
+  }
+
+  // 2) Very few guesses + very short time (scripted binary search / auto-clicker)
+  if(g <= 2 && elapsed > 0 && elapsed < 2500){
+    return { flagged: true, reason: 'win_too_fast_low_guesses', details: Object.assign({}, details, { threshold_ms: 2500, max_guesses: 2 }) };
+  }
+  if(g <= 4 && elapsed > 0 && elapsed < 4000){
+    return { flagged: true, reason: 'win_too_fast_few_guesses', details: Object.assign({}, details, { threshold_ms: 4000, max_guesses: 4 }) };
+  }
+  if(g <= 6 && elapsed > 0 && elapsed < 5500){
+    return { flagged: true, reason: 'win_too_fast_moderate', details: Object.assign({}, details, { threshold_ms: 5500, max_guesses: 6 }) };
+  }
+
+  // 3) Average time per guess unrealistically low (auto-submit)
+  const avgPerGuess = elapsed / g;
+  if(g >= 3 && avgPerGuess < 400){
+    return { flagged: true, reason: 'avg_time_per_guess_too_low', details: Object.assign({}, details, { avg_ms: Math.round(avgPerGuess), threshold_ms: 400 }) };
+  }
+
+  // 4) Burst wins: more than 4 wins in the last 45 seconds
+  recentWinTimestamps = (recentWinTimestamps || []).filter(t => now - t < 45000);
+  recentWinTimestamps.push(now);
+  if(recentWinTimestamps.length > 4){
+    return { flagged: true, reason: 'win_burst_rate', details: Object.assign({}, details, { wins_in_window: recentWinTimestamps.length, window_ms: 45000 }) };
+  }
+
+  // 5) Extreme mode with near-perfect speed (harder range, still too fast)
+  if(mode === 'extreme' && g <= 8 && elapsed > 0 && elapsed < 8000){
+    return { flagged: true, reason: 'extreme_mode_too_fast', details: Object.assign({}, details, { threshold_ms: 8000 }) };
+  }
+
+  return null; // clean
+}
+
+/**
+ * Apply 24h device ban + admin audit log. Does not award the win.
+ */
+async function applyAntiCheatBan(flag){
+  if(!flag || !flag.flagged) return;
+  const untilMs = Date.now() + ANTI_CHEAT_BAN_MS;
+  const untilIso = new Date(untilMs).toISOString();
+  let did = null;
+  try{ did = DEVICE_ID || localStorage.getItem('gz_device_id') || null; }catch(e){ did = DEVICE_ID || null; }
+  const uid = CURRENT_USER ? CURRENT_USER.id : null;
+  const uname = CURRENT_USER ? CURRENT_USER.username : null;
+
+  // Local soft lock so UI stops immediately
+  try{
+    localStorage.setItem('gz_bot_ban_until', String(untilMs));
+    localStorage.setItem('gz_bot_ban_reason', ANTI_CHEAT_REASON);
+    localStorage.removeItem('gz_user_id');
+  }catch(e){}
+
+  if(sb){
+    // Device ban 24 hours
+    if(did){
+      try{
+        await sb.from('banned_devices').upsert({
+          device_id: did,
+          reason: ANTI_CHEAT_REASON + ' (' + (flag.reason || 'suspicious') + ')',
+          banned_until: untilIso,
+          banned_at: new Date().toISOString(),
+          banned_by: null,
+          note: 'Automatic anti-cheat enforcement. Details: ' + JSON.stringify(flag.details || {})
+        });
+      }catch(e){ console.warn('anti-cheat device ban', e); }
+    }
+    // Soft-ban the account for the same window (so they cannot just re-login on same device)
+    if(uid){
+      try{
+        await sb.from('users').update({
+          banned: true,
+          ban_type: 'device',
+          ban_reason: ANTI_CHEAT_REASON,
+          ban_until: untilIso,
+          banned_at: new Date().toISOString()
+        }).eq('id', uid);
+      }catch(e){ console.warn('anti-cheat user ban', e); }
+    }
+    // Admin audit log (English)
+    try{
+      await sb.from('audit_log').insert({
+        actor_id: null,
+        actor_username: 'SYSTEM',
+        action: 'anti_cheat',
+        target_user_id: uid || null,
+        target_username: uname,
+        target_device_id: did,
+        details: {
+          source: 'client_anti_cheat_v1',
+          reason: flag.reason || 'suspicious_win',
+          banned_until: untilIso,
+          ban_duration_hours: 24,
+          note: 'Device banned for 24 hours due to anti-cheat detection',
+          detection: flag.details || {}
+        }
+      });
+    }catch(e){ console.warn('anti-cheat audit', e); }
+  }
+
+  CURRENT_USER = null;
+  // Show clear English ban screen
+  try{
+    hideAllScreens();
+    if($('banScreen')){
+      $('banScreen').classList.remove('hidden');
+      if($('banTypeText')) $('banTypeText').textContent = 'Device ban (Anti-Cheat)';
+      if($('banReasonText')) $('banReasonText').textContent = ANTI_CHEAT_REASON + ' — ' + String(flag.reason || 'suspicious pattern');
+      if($('banUntilText')) $('banUntilText').textContent = fmtDate(untilIso) + ' (24 hours)';
+    } else {
+      // Fallback full-page message
+      document.documentElement.style.pointerEvents = 'none';
+      document.documentElement.innerHTML = '<body style="margin:0;background:#0a0505;color:#f5e6d0;font-family:Tahoma,Arial,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;text-align:center;padding:24px"><div style="max-width:440px"><div style="font-size:56px;margin-bottom:12px">🛡️</div><div style="font-size:20px;font-weight:900;line-height:1.5;color:#ff6b6b;margin-bottom:14px">Anti-Cheat: Device Banned</div><div style="font-size:14px;color:#c9a227;margin-bottom:8px">Your device has been temporarily banned for 24 hours.</div><div style="font-size:13px;color:#9a8b72;line-height:1.65">Suspicious win pattern was detected (too fast or unnatural rate). Fair play is required.<br><br>Ban ends: '+escapeHtml(fmtDate(untilIso))+'<br>Reason code: '+escapeHtml(String(flag.reason||'suspicious'))+'</div></div></body>';
+    }
+  }catch(e){}
+  toast('Anti-cheat: device banned for 24 hours');
+}
+
 async function registerWin(guesses, modeKey){
   const u = CURRENT_USER;
   if(!u) return;
+
+  // --- Anti-cheat gate: never award the win if flagged ---
+  try{
+    const flag = detectAntiCheat(guesses, modeKey);
+    if(flag && flag.flagged){
+      await applyAntiCheatBan(flag);
+      return; // stop — no XP, no stats, no clan XP
+    }
+  }catch(e){ console.warn('anti-cheat check', e); }
+
   const mode = GAME_MODES[modeKey || gameMode] || GAME_MODES.normal;
   const xpGained = Math.max(mode.xpBase - (guesses - 1) * mode.xpStep, mode.xpMin);
 
@@ -6402,6 +6560,7 @@ function enterDuelGame(room){
   currentGuessCount = 0;
   typedDigits = '';
   guessHistory = [];
+  roundStartTime = Date.now();
   renderTypedDigits();
   renderGuessHistory();
   if($('statThisGuesses')) $('statThisGuesses').textContent = '0';
